@@ -131,15 +131,3 @@ func IsRoutableModel(id string) bool {
 	}
 	return true
 }
-
-// NormalizeUpstreamModel returns the upstream model ID by stripping the
-// CLIProxyAPI "dimagent-" prefix while preserving a trailing thinking suffix
-// (e.g. "(1024)") added by the thinking pipeline.
-func NormalizeUpstreamModel(model string) string {
-	trimmed := strings.TrimSpace(model)
-	prefix := ProviderKey + "-"
-	if len(trimmed) > len(prefix) && strings.HasPrefix(strings.ToLower(trimmed), prefix) {
-		trimmed = trimmed[len(prefix):]
-	}
-	return trimmed
-}

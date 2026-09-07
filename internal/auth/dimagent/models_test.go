@@ -1,7 +1,6 @@
 package dimagent
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -170,21 +169,5 @@ func TestIsRoutableModel(t *testing.T) {
 		if got := IsRoutableModel(id); got != want {
 			t.Errorf("IsRoutableModel(%q) = %v, want %v", id, got, want)
 		}
-	}
-}
-
-func TestNormalizeUpstreamModel(t *testing.T) {
-	for in, want := range map[string]string{
-		"dimagent-deepseek-v4-flash": "deepseek-v4-flash",
-		"deepseek-v4-flash":          "deepseek-v4-flash",
-		"dimagent-kimi-k3":           "kimi-k3",
-		"":                           "",
-	} {
-		if got := NormalizeUpstreamModel(in); got != want {
-			t.Errorf("NormalizeUpstreamModel(%q) = %q, want %q", in, got, want)
-		}
-	}
-	if strings.Contains(NormalizeUpstreamModel("dimagent-x"), "dimagent-") {
-		t.Error("prefix should be stripped")
 	}
 }

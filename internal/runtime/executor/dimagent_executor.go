@@ -76,13 +76,11 @@ func dimAgentBaseURL(a *cliproxyauth.Auth) string {
 	return dimagentauth.DefaultBaseURL
 }
 
-// normalizeDimAgentUpstreamModel returns the upstream model ID by stripping
-// the CLIProxyAPI "dimagent-" prefix while preserving a trailing thinking
-// suffix (e.g. "(high)").
+// normalizeDimAgentUpstreamModel returns the upstream model ID while
+// preserving a trailing thinking suffix (e.g. "(high)").
 func normalizeDimAgentUpstreamModel(model string) string {
 	parsed := thinking.ParseSuffix(model)
 	base := strings.TrimSpace(parsed.ModelName)
-	base = dimagentauth.NormalizeUpstreamModel(base)
 	if parsed.HasSuffix {
 		return base + "(" + parsed.RawSuffix + ")"
 	}

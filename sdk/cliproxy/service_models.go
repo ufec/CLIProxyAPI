@@ -872,14 +872,6 @@ func buildCodeBuddyAuthModels(auth *coreauth.Auth) []*ModelInfo {
 	return out
 }
 
-// dimAgentModelID returns the gateway-facing model ID for a DimAgent upstream
-// model. The "dimagent-" prefix namespaces the catalog so upstream IDs that
-// collide with other providers (e.g. kimi-k3) stay unambiguous; the executor
-// strips the prefix before forwarding.
-func dimAgentModelID(upstreamID string) string {
-	return dimagentauth.ProviderKey + "-" + upstreamID
-}
-
 // buildDimAgentAuthModels builds the DimAgent model catalog from per-auth
 // metadata synced from the upstream /v1/models?type=dim endpoint at login and
 // refresh time. Models without metadata fall back to plain ID entries.
@@ -899,7 +891,7 @@ func buildDimAgentAuthModels(auth *coreauth.Auth) []*ModelInfo {
 						continue
 					}
 					info := &ModelInfo{
-						ID:          dimAgentModelID(m.ID),
+						ID:          m.ID,
 						Object:      "model",
 						Created:     now,
 						OwnedBy:     dimagentauth.ProviderKey,
@@ -937,7 +929,7 @@ func buildDimAgentAuthModels(auth *coreauth.Auth) []*ModelInfo {
 			continue
 		}
 		out = append(out, &ModelInfo{
-			ID:      dimAgentModelID(id),
+			ID:      id,
 			Object:  "model",
 			Created: now,
 			OwnedBy: dimagentauth.ProviderKey,
