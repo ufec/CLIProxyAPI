@@ -23,6 +23,7 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewClaudeAuthenticator(),
 		sdkAuth.NewXAIAuthenticator(),
 		sdkAuth.NewCodeBuddyAuthenticator(),
+		sdkAuth.NewDimAgentAuthenticator(),
 	)
 }
 

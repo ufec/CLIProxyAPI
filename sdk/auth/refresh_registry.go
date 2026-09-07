@@ -12,6 +12,8 @@ func init() {
 	registerRefreshLead("antigravity", func() Authenticator { return NewAntigravityAuthenticator() })
 	registerRefreshLead("kimi", func() Authenticator { return NewKimiAuthenticator() })
 	registerRefreshLead("xai", func() Authenticator { return NewXAIAuthenticator() })
+	registerRefreshLead("codebuddy-cn", func() Authenticator { return NewCodeBuddyAuthenticator() })
+	registerRefreshLead("dimagent", func() Authenticator { return NewDimAgentAuthenticator() })
 }
 
 func registerRefreshLead(provider string, factory func() Authenticator) {

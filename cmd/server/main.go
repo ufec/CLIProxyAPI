@@ -82,6 +82,7 @@ func main() {
 	var kimiLogin bool
 	var xaiLogin bool
 	var codebuddyCnLogin bool
+	var dimagentLogin bool
 	var vertexImport string
 	var vertexImportPrefix string
 	var configPath string
@@ -102,6 +103,7 @@ func main() {
 	flag.BoolVar(&kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
 	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
 	flag.BoolVar(&codebuddyCnLogin, "codebuddy-cn-login", false, "Login to CodeBuddy CN (WorkBuddy) using OAuth")
+	flag.BoolVar(&dimagentLogin, "dimagent-login", false, "Login to DimAgent using OAuth")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
@@ -590,7 +592,7 @@ func main() {
 		CallbackPort: oauthCallbackPort,
 	}
 
-	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin || codebuddyCnLogin
+	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin || codebuddyCnLogin || dimagentLogin
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
 	exampleAPIKeySafeMode := shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode)
@@ -667,6 +669,9 @@ func main() {
 	} else if codebuddyCnLogin {
 		// Handle CodeBuddy (WorkBuddy) login
 		cmd.DoCodeBuddyLogin(cfg, options)
+	} else if dimagentLogin {
+		// Handle DimAgent login
+		cmd.DoDimAgentLogin(cfg, options)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {

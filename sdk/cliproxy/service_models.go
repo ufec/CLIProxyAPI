@@ -8,6 +8,7 @@ import (
 	"time"
 
 	codebuddyauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codebuddy"
+	dimagentauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/dimagent"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -148,6 +149,9 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = applyExcludedModels(models, excluded)
 	case "codebuddy-cn":
 		models = buildCodeBuddyAuthModels(a)
+		models = applyExcludedModels(models, excluded)
+	case "dimagent":
+		models = buildDimAgentAuthModels(a)
 		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
@@ -863,6 +867,81 @@ func buildCodeBuddyAuthModels(auth *coreauth.Auth) []*ModelInfo {
 			Created: now,
 			OwnedBy: "codebuddy-cn",
 			Type:    "codebuddy-cn",
+		})
+	}
+	return out
+}
+
+// dimAgentModelID returns the gateway-facing model ID for a DimAgent upstream
+// model. The "dimagent-" prefix namespaces the catalog so upstream IDs that
+// collide with other providers (e.g. kimi-k3) stay unambiguous; the executor
+// strips the prefix before forwarding.
+func dimAgentModelID(upstreamID string) string {
+	return dimagentauth.ProviderKey + "-" + upstreamID
+}
+
+// buildDimAgentAuthModels builds the DimAgent model catalog from per-auth
+// metadata synced from the upstream /v1/models?type=dim endpoint at login and
+// refresh time. Models without metadata fall back to plain ID entries.
+func buildDimAgentAuthModels(auth *coreauth.Auth) []*ModelInfo {
+	if auth == nil || len(auth.Metadata) == 0 {
+		return nil
+	}
+	now := time.Now().Unix()
+	if raw, ok := auth.Metadata["models_meta"].(string); ok {
+		if trimmed := strings.TrimSpace(raw); trimmed != "" {
+			var meta []dimagentauth.ModelInfo
+			if err := json.Unmarshal([]byte(trimmed), &meta); err == nil && len(meta) > 0 {
+				out := make([]*ModelInfo, 0, len(meta))
+				for i := range meta {
+					m := &meta[i]
+					if !dimagentauth.IsRoutableModel(m.ID) {
+						continue
+					}
+					info := &ModelInfo{
+						ID:          dimAgentModelID(m.ID),
+						Object:      "model",
+						Created:     now,
+						OwnedBy:     dimagentauth.ProviderKey,
+						Type:        dimagentauth.ProviderKey,
+						DisplayName: m.DisplayName(),
+						Name:        m.DisplayName(),
+					}
+					if ctxLimit := m.ContextLimit(); ctxLimit > 0 {
+						info.ContextLength = ctxLimit
+						info.MaxContextLength = ctxLimit
+						info.InputTokenLimit = ctxLimit
+					}
+					if outLimit := m.OutputLimit(); outLimit > 0 {
+						info.MaxCompletionTokens = outLimit
+						info.OutputTokenLimit = outLimit
+					}
+					if m.SupportsVision() {
+						info.SupportedInputModalities = append(info.SupportedInputModalities, "image")
+					}
+					out = append(out, info)
+				}
+				if len(out) > 0 {
+					return out
+				}
+			}
+		}
+	}
+	ids, ok := metadataStringSlice(auth.Metadata["enabled_models"])
+	if !ok {
+		return nil
+	}
+	out := make([]*ModelInfo, 0, len(ids))
+	for _, id := range ids {
+		if !dimagentauth.IsRoutableModel(id) {
+			continue
+		}
+		out = append(out, &ModelInfo{
+			ID:      dimAgentModelID(id),
+			Object:  "model",
+			Created: now,
+			OwnedBy: dimagentauth.ProviderKey,
+			Type:    dimagentauth.ProviderKey,
 		})
 	}
 	return out

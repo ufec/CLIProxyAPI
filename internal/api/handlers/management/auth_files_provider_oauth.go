@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	codebuddyauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codebuddy"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	dimagentauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/dimagent"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
@@ -859,6 +860,198 @@ func accountUIDValue(account *codebuddyauth.AccountInfo) string {
 		return ""
 	}
 	return account.UID
+}
+
+// dimAgentCallbackPort is the fixed OAuth callback port for DimAgent.
+const dimAgentCallbackPort = dimagentauth.CallbackPort
+
+// RequestDimAgentToken starts the DimAgent OAuth authorization code + PKCE
+// flow. When called from the Web UI (is_webui=true) it additionally starts a
+// best-effort callback forwarder on the fixed redirect port (54321) so that
+// browser redirects on the same machine are captured automatically. When the
+// port is unavailable (e.g. the DimAgent desktop app is running, or the
+// browser is on another machine) the user can paste the full callback URL
+// into the management UI, which is delivered through the /oauth-callback
+// endpoint and the same callback-file mechanism.
+func (h *Handler) RequestDimAgentToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing DimAgent authentication...")
+
+	pkceCodes, err := dimagentauth.GeneratePKCECodes()
+	if err != nil {
+		log.Errorf("Failed to generate DimAgent PKCE codes: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PKCE codes"})
+		return
+	}
+
+	state, err := dimagentauth.GenerateState()
+	if err != nil {
+		log.Errorf("Failed to generate DimAgent state parameter: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
+		return
+	}
+
+	client := dimagentauth.NewClient(h.cfg, "")
+
+	authURL, err := client.GenerateAuthURL(state, pkceCodes)
+	if err != nil {
+		log.Errorf("Failed to generate DimAgent authorization URL: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
+		return
+	}
+
+	RegisterOAuthSession(state, "dimagent")
+
+	isWebUI := isWebUIRequest(c)
+	var forwarder *callbackForwarder
+	if isWebUI {
+		if targetURL, errTarget := h.managementCallbackURL("/v0/management/oauth-callback"); errTarget != nil {
+			log.WithError(errTarget).Error("failed to compute dimagent callback target")
+		} else {
+			var errStart error
+			forwarder, errStart = startCallbackForwarder(dimAgentCallbackPort, "dimagent", targetURL)
+			if errStart != nil {
+				// Best effort: the DimAgent desktop app or another process may
+				// hold the fixed redirect port. The manual callback paste path
+				// still works.
+				log.Warnf("dimagent: callback forwarder unavailable on port %d: %v", dimAgentCallbackPort, errStart)
+				forwarder = nil
+			}
+		}
+	}
+
+	go func() {
+		if isWebUI {
+			defer stopCallbackForwarderInstance(dimAgentCallbackPort, forwarder)
+		}
+
+		pollCtx, cancelPoll := context.WithCancel(ctx)
+		defer cancelPoll()
+		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, "dimagent")
+
+		fmt.Println("Waiting for DimAgent authorization callback...")
+		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-dimagent-%s.oauth", state))
+		deadline := time.Now().Add(5 * time.Minute)
+		var code string
+		for {
+			if !IsOAuthSessionPending(state, "dimagent") {
+				return
+			}
+			if time.Now().After(deadline) {
+				log.Error("DimAgent authentication: timeout waiting for OAuth callback")
+				SetOAuthSessionError(state, "Timeout waiting for OAuth callback")
+				return
+			}
+			if data, errR := os.ReadFile(waitFile); errR == nil {
+				var m map[string]string
+				_ = json.Unmarshal(data, &m)
+				_ = os.Remove(waitFile)
+				if errStr := m["error"]; errStr != "" {
+					log.Errorf("DimAgent authentication failed: %s", errStr)
+					SetOAuthSessionError(state, "Authentication failed")
+					return
+				}
+				if m["state"] != state {
+					log.Errorf("DimAgent authentication: state mismatch, expected %s, got %s", state, m["state"])
+					SetOAuthSessionError(state, "State code error")
+					return
+				}
+				code = m["code"]
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if !IsOAuthSessionPending(state, "dimagent") {
+			return
+		}
+
+		token, errExchange := client.ExchangeCodeForTokens(pollCtx, code, pkceCodes)
+		if errExchange != nil {
+			if !IsOAuthSessionPending(state, "dimagent") {
+				return
+			}
+			log.Errorf("Failed to exchange DimAgent authorization code for tokens: %v", errExchange)
+			SetOAuthSessionError(state, "Failed to exchange authorization code for tokens")
+			return
+		}
+		if !IsOAuthSessionPending(state, "dimagent") {
+			return
+		}
+
+		// Available models are optional extras; the executor re-syncs them on refresh.
+		storage := dimagentauth.NewTokenStorage(token)
+		if modelsData, modelsErr := client.FetchModels(pollCtx, token.AccessToken); modelsErr != nil {
+			log.Warnf("dimagent: failed to fetch models: %v", modelsErr)
+		} else if models, parseErr := dimagentauth.ParseModels(modelsData); parseErr != nil {
+			log.Warnf("dimagent: failed to parse models: %v", parseErr)
+		} else if len(models) > 0 {
+			ids := make([]string, 0, len(models))
+			for _, m := range models {
+				ids = append(ids, m.ID)
+			}
+			storage.EnabledModels = ids
+			if raw, marshalErr := json.Marshal(models); marshalErr == nil {
+				storage.ModelsMeta = string(raw)
+			}
+		}
+
+		metadata := map[string]any{
+			"type":          "dimagent",
+			"access_token":  storage.AccessToken,
+			"refresh_token": storage.RefreshToken,
+			"token_type":    storage.TokenType,
+			"timestamp":     time.Now().UnixMilli(),
+		}
+		if storage.Scope != "" {
+			metadata["scope"] = storage.Scope
+		}
+		if storage.UID != "" {
+			metadata["uid"] = storage.UID
+		}
+		if storage.Sub != "" {
+			metadata["sub"] = storage.Sub
+		}
+		if storage.Nickname != "" {
+			metadata["nickname"] = storage.Nickname
+		}
+		if storage.Expired != "" {
+			metadata["expired"] = storage.Expired
+		}
+		if len(storage.EnabledModels) > 0 {
+			metadata["enabled_models"] = storage.EnabledModels
+		}
+		if storage.ModelsMeta != "" {
+			metadata["models_meta"] = storage.ModelsMeta
+		}
+
+		fileName := fmt.Sprintf("dimagent-%d.json", time.Now().UnixMilli())
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "dimagent",
+			FileName: fileName,
+			Label:    storage.AccountLabel(),
+			Storage:  storage,
+			Metadata: metadata,
+		}
+		if errGuard := guardOAuthSessionPendingForSave(state, "dimagent"); errGuard != nil {
+			return
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save DimAgent authentication tokens: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use DimAgent services through this CLI")
+		CompleteOAuthSession(state)
+	}()
+
+	response := gin.H{"status": "ok", "url": authURL, "state": state, "flow": "dimagent"}
+	c.JSON(200, response)
 }
 
 // CancelAuthSession cancels a pending OAuth session identified by state.
