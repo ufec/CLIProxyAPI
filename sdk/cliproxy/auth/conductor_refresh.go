@@ -429,6 +429,14 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	_, _ = m.refreshAuthForRequest(ctx, id, "")
 }
 
+// ForceRefresh synchronously refreshes the credential for the given auth id,
+// bypassing expiration-based scheduling. It is intended for explicit manual
+// refresh triggers (e.g. the management UI refresh button) where the caller
+// wants an immediate token rotation even if the access token is still valid.
+func (m *Manager) ForceRefresh(ctx context.Context, id string) (*Auth, error) {
+	return m.refreshAuthForRequest(ctx, id, "")
+}
+
 // refreshAuthForRequest performs a synchronous credential refresh for the given auth.
 // failedAccessToken lets concurrent callers reuse a refresh that already replaced the
 // access token that produced the unauthorized response.

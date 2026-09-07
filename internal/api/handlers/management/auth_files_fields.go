@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 )
 
 // PatchAuthFileStatus toggles the disabled state of an auth file
@@ -113,6 +114,66 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
+}
+
+// RefreshAuthFile forces an immediate OAuth token refresh for the given auth file.
+// Unlike the legacy "patch expired to the past" approach, this invokes the
+// provider executor directly, so it works for JWT-based credentials whose
+// access_token exp would otherwise take precedence over the stored expiry.
+func (h *Handler) RefreshAuthFile(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+
+	var req struct {
+		Name      string `json:"name"`
+		AuthIndex string `json:"auth_index"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	targetAuth, found := h.lookupAuthFile(name, req.AuthIndex)
+	if !found || targetAuth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+		return
+	}
+	if coreauth.IsPluginVirtualAuth(targetAuth) {
+		c.JSON(http.StatusConflict, gin.H{"error": "virtual auth cannot be refreshed"})
+		return
+	}
+	if coreauth.IsConfigAPIKeyAuth(targetAuth) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "config api key auth does not support refresh"})
+		return
+	}
+
+	updated, err := h.authManager.ForceRefresh(ctx, targetAuth.ID)
+	if err != nil {
+		log.WithError(err).Warnf("manual refresh failed for %s (%s)", targetAuth.Provider, targetAuth.ID)
+		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("refresh failed: %v", err)})
+		return
+	}
+
+	resp := gin.H{"status": "ok", "name": name}
+	if updated != nil {
+		if exp, okExp := updated.ExpirationTime(); okExp && !exp.IsZero() {
+			resp["expired"] = exp.UTC().Format(time.RFC3339)
+		}
+		if !updated.LastRefreshedAt.IsZero() {
+			resp["last_refresh"] = updated.LastRefreshedAt.UTC().Format(time.RFC3339)
+		}
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // patchPluginVirtualSourceStatus toggles disabled on a plugin multi-auth source file and all
