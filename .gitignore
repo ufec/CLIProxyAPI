@@ -63,6 +63,13 @@ _bmad-output/*
 # docker
 docker-compose.override.yml
 
+# Local build/deploy artifacts
+cliproxyapi-server.zip
+deploy/
+deploy-package/
+cloudflare-worker/
+dimagent-oauth-service/
+
 
 # Local LLM Wiki vault
 .llm-wiki
