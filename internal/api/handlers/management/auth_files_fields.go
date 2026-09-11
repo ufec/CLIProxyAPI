@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -120,6 +121,8 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 // Unlike the legacy "patch expired to the past" approach, this invokes the
 // provider executor directly, so it works for JWT-based credentials whose
 // access_token exp would otherwise take precedence over the stored expiry.
+// It also supports bulk refresh: pass ?all=true (or JSON body {"all": true}) to
+// refresh every credential, and accepts ?name=/query fallbacks like RefreshAuthFiles.
 func (h *Handler) RefreshAuthFile(c *gin.Context) {
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
@@ -129,9 +132,30 @@ func (h *Handler) RefreshAuthFile(c *gin.Context) {
 	var req struct {
 		Name      string `json:"name"`
 		AuthIndex string `json:"auth_index"`
+		All       bool   `json:"all"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	if c.Query("all") == "true" {
+		req.All = true
+	}
+	if queryName := strings.TrimSpace(c.Query("name")); queryName != "" && req.Name == "" {
+		req.Name = queryName
+	}
+	if queryAuthIndex := strings.TrimSpace(c.Query("auth_index")); queryAuthIndex != "" && req.AuthIndex == "" {
+		req.AuthIndex = queryAuthIndex
+	}
+
+	ctx := c.Request.Context()
+
+	if req.All {
+		results := h.authManager.ForceRefreshAll(ctx)
+		c.JSON(http.StatusOK, gin.H{
+			"ok":      true,
+			"results": results,
+		})
 		return
 	}
 
@@ -140,8 +164,6 @@ func (h *Handler) RefreshAuthFile(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
 		return
 	}
-
-	ctx := c.Request.Context()
 
 	targetAuth, found := h.lookupAuthFile(name, req.AuthIndex)
 	if !found || targetAuth == nil {
