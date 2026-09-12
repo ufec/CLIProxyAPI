@@ -27,6 +27,20 @@ const (
 	// PlatformDomain is the X-Domain header value used by plugin and inference endpoints.
 	PlatformDomain = "copilot.tencent.com"
 
+	// IntlBaseURL is the upstream base URL of the CodeBuddy/WorkBuddy international deployment.
+	IntlBaseURL = "https://www.workbuddy.ai"
+	// IntlDomain is the X-Domain header value used by all international endpoints.
+	IntlDomain = "www.workbuddy.ai"
+	// IntlUserAgent is the User-Agent expected by the international upstream.
+	IntlUserAgent = "workbuddy-ai/5.5.2 workbuddy-ai/5.5.2 CLI/2.137.1"
+	// IntlIDEVersion is the X-IDE-Version header value for the international client.
+	IntlIDEVersion = "5.5.2"
+
+	// ProviderCN is the provider identifier of the CodeBuddy CN deployment.
+	ProviderCN = "codebuddy-cn"
+	// ProviderIntl is the provider identifier of the CodeBuddy/WorkBuddy international deployment.
+	ProviderIntl = "codebuddy-intl"
+
 	// PluginAuthStatePath is the endpoint path for generating an auth state.
 	PluginAuthStatePath = "/v2/plugin/auth/state"
 	// PluginAuthTokenPath is the endpoint path for exchanging a state for tokens.
@@ -45,6 +59,8 @@ const (
 	AuthSourcePlugin = "plugin"
 	// PlatformWorkBuddy is the platform query parameter used when generating an auth state.
 	PlatformWorkBuddy = "workbuddy"
+	// PlatformWorkBuddyAI is the platform query parameter used by the international deployment.
+	PlatformWorkBuddyAI = "workbuddy-ai"
 
 	// ClientUserAgent is the User-Agent expected by the CodeBuddy upstream.
 	ClientUserAgent = "WorkBuddy/5.2.5 WorkBuddy/5.2.5 CLI/2.106.4"
@@ -86,6 +102,66 @@ type AccountInfo struct {
 	Type        string `json:"type"`
 	UIN         string `json:"uin"`
 	PhoneNumber string `json:"phoneNumber"`
+}
+
+// Region describes the per-market endpoints and branding of a CodeBuddy
+// deployment. The CN deployment serves auth/plugin endpoints on
+// copilot.tencent.com while the international deployment serves everything on
+// www.workbuddy.ai; both share the same protocol.
+type Region struct {
+	// Provider is the CLIProxyAPI provider identifier (e.g. "codebuddy-cn").
+	Provider string
+	// BaseURL is the upstream base URL for all endpoints.
+	BaseURL string
+	// StateDomain is the X-Domain header value used by the state endpoint.
+	StateDomain string
+	// APIDomain is the X-Domain header value used by the remaining endpoints.
+	APIDomain string
+	// Platform is the platform query parameter used when generating an auth state.
+	Platform string
+	// UserAgent is the User-Agent expected by the upstream.
+	UserAgent string
+	// IDEVersion is the X-IDE-Version header value.
+	IDEVersion string
+	// Label is the human-readable region name used in login messages.
+	Label string
+}
+
+// RegionCN is the CN (Tencent) deployment.
+var RegionCN = &Region{
+	Provider:    ProviderCN,
+	BaseURL:     DefaultBaseURL,
+	StateDomain: PlatformDomain,
+	APIDomain:   DefaultDomain,
+	Platform:    PlatformWorkBuddy,
+	UserAgent:   ClientUserAgent,
+	IDEVersion:  "5.2.5",
+	Label:       "CodeBuddy CN",
+}
+
+// RegionIntl is the international (workbuddy.ai) deployment.
+var RegionIntl = &Region{
+	Provider:    ProviderIntl,
+	BaseURL:     IntlBaseURL,
+	StateDomain: IntlDomain,
+	APIDomain:   IntlDomain,
+	Platform:    PlatformWorkBuddyAI,
+	UserAgent:   IntlUserAgent,
+	IDEVersion:  IntlIDEVersion,
+	Label:       "CodeBuddy Intl",
+}
+
+// RegionForProvider resolves the region for a provider identifier and returns
+// nil for unknown providers.
+func RegionForProvider(provider string) *Region {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case ProviderIntl:
+		return RegionIntl
+	case ProviderCN:
+		return RegionCN
+	default:
+		return nil
+	}
 }
 
 // envelope is the unified {code, msg, data} response wrapper.
@@ -138,11 +214,22 @@ func effectiveBaseURL(override string) string {
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
+	region     *Region
 }
 
-// NewClient creates a CodeBuddy auth client. proxyURL, when non-empty, takes
-// precedence over cfg.ProxyURL.
+// NewClient creates a CodeBuddy auth client for the CN deployment. proxyURL,
+// when non-empty, takes precedence over cfg.ProxyURL.
 func NewClient(cfg *config.Config, proxyURL string) *Client {
+	return NewClientForRegion(cfg, proxyURL, nil)
+}
+
+// NewClientForRegion creates a CodeBuddy auth client for the given region. A
+// nil region falls back to the CN deployment. proxyURL, when non-empty, takes
+// precedence over cfg.ProxyURL.
+func NewClientForRegion(cfg *config.Config, proxyURL string, region *Region) *Client {
+	if region == nil {
+		region = RegionCN
+	}
 	client := &http.Client{}
 	effectiveProxyURL := strings.TrimSpace(proxyURL)
 	var sdkCfg config.SDKConfig
@@ -156,7 +243,8 @@ func NewClient(cfg *config.Config, proxyURL string) *Client {
 	util.SetProxy(&sdkCfg, client)
 	return &Client{
 		httpClient: client,
-		baseURL:    DefaultBaseURL,
+		baseURL:    region.BaseURL,
+		region:     region,
 	}
 }
 
@@ -182,18 +270,18 @@ func (c *Client) decodeEnvelope(resp *http.Response, action string) (json.RawMes
 
 // FetchState generates a fresh auth state and authorization URL.
 func (c *Client) FetchState(ctx context.Context) (*StateResult, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, BuildAuthStateURL(c.baseURL)+"?platform="+PlatformWorkBuddy, strings.NewReader("{}"))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, BuildAuthStateURL(c.baseURL)+"?platform="+c.region.Platform, strings.NewReader("{}"))
 	if err != nil {
 		return nil, fmt.Errorf("codebuddy: build state request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Domain", PlatformDomain)
+	req.Header.Set("X-Domain", c.region.StateDomain)
 	req.Header.Set("X-No-Authorization", "true")
 	req.Header.Set("X-No-User-Id", "true")
 	req.Header.Set("X-No-Enterprise-Id", "true")
 	req.Header.Set("X-No-Department-Info", "true")
 	req.Header.Set("X-Product", "SaaS")
-	req.Header.Set("User-Agent", ClientUserAgent)
+	req.Header.Set("User-Agent", c.region.UserAgent)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -234,7 +322,7 @@ func (c *Client) FetchToken(ctx context.Context, state string) (*TokenResponse, 
 	req.Header.Set("X-No-Enterprise-Id", "true")
 	req.Header.Set("X-No-Department-Info", "true")
 	req.Header.Set("X-Product", "SaaS")
-	req.Header.Set("User-Agent", ClientUserAgent)
+	req.Header.Set("User-Agent", c.region.UserAgent)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -299,11 +387,11 @@ func (c *Client) GetAccountInfo(ctx context.Context, accessToken, state string) 
 		return nil, fmt.Errorf("codebuddy: build account request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("X-Domain", DefaultDomain)
+	req.Header.Set("X-Domain", c.region.APIDomain)
 	req.Header.Set("X-No-User-Id", "true")
 	req.Header.Set("X-No-Enterprise-Id", "true")
 	req.Header.Set("X-No-Department-Info", "true")
-	req.Header.Set("User-Agent", ClientUserAgent)
+	req.Header.Set("User-Agent", c.region.UserAgent)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -337,9 +425,9 @@ func (c *Client) FetchConfig(ctx context.Context, accessToken, userID string) ([
 		return nil, fmt.Errorf("codebuddy: build config request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("X-Domain", DefaultDomain)
+	req.Header.Set("X-Domain", c.region.APIDomain)
 	req.Header.Set("X-Product", "SaaS")
-	req.Header.Set("User-Agent", ClientUserAgent)
+	req.Header.Set("User-Agent", c.region.UserAgent)
 	if userID = strings.TrimSpace(userID); userID != "" {
 		req.Header.Set("X-User-Id", userID)
 	}
@@ -367,11 +455,11 @@ func (c *Client) RefreshToken(ctx context.Context, refreshToken string) (*TokenR
 		return nil, fmt.Errorf("codebuddy: build refresh request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Domain", DefaultDomain)
+	req.Header.Set("X-Domain", c.region.APIDomain)
 	req.Header.Set("X-Refresh-Token", refreshToken)
 	req.Header.Set("X-Auth-Refresh-Source", AuthSourcePlugin)
 	req.Header.Set("Authorization", "Bearer "+refreshToken)
-	req.Header.Set("User-Agent", ClientUserAgent)
+	req.Header.Set("User-Agent", c.region.UserAgent)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

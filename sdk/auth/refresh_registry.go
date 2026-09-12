@@ -13,6 +13,7 @@ func init() {
 	registerRefreshLead("kimi", func() Authenticator { return NewKimiAuthenticator() })
 	registerRefreshLead("xai", func() Authenticator { return NewXAIAuthenticator() })
 	registerRefreshLead("codebuddy-cn", func() Authenticator { return NewCodeBuddyAuthenticator() })
+	registerRefreshLead("codebuddy-intl", func() Authenticator { return NewCodeBuddyIntlAuthenticator() })
 	registerRefreshLead("dimagent", func() Authenticator { return NewDimAgentAuthenticator() })
 }
 

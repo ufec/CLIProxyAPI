@@ -740,61 +740,77 @@ func watchOAuthSessionCancel(pollCtx context.Context, cancel context.CancelFunc,
 }
 
 func (h *Handler) RequestCodeBuddyToken(c *gin.Context) {
+	h.requestCodeBuddyTokenForRegion(c, nil)
+}
+
+// RequestCodeBuddyIntlToken starts the CodeBuddy international (workbuddy.ai)
+// state-based authentication flow.
+func (h *Handler) RequestCodeBuddyIntlToken(c *gin.Context) {
+	h.requestCodeBuddyTokenForRegion(c, codebuddyauth.RegionIntl)
+}
+
+// requestCodeBuddyTokenForRegion runs the region-aware CodeBuddy (WorkBuddy)
+// state-based authentication flow; a nil region falls back to the CN deployment.
+func (h *Handler) requestCodeBuddyTokenForRegion(c *gin.Context, region *codebuddyauth.Region) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 
-	fmt.Println("Initializing CodeBuddy (WorkBuddy) authentication...")
+	if region == nil {
+		region = codebuddyauth.RegionCN
+	}
 
-	client := codebuddyauth.NewClient(h.cfg, "")
+	fmt.Printf("Initializing %s (WorkBuddy) authentication...\n", region.Label)
+
+	client := codebuddyauth.NewClientForRegion(h.cfg, "", region)
 	stateResult, errFetchState := client.FetchState(ctx)
 	if errFetchState != nil {
-		log.Errorf("Failed to generate CodeBuddy authorization URL: %v", errFetchState)
+		log.Errorf("Failed to generate %s authorization URL: %v", region.Provider, errFetchState)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to generate authorization url"})
 		return
 	}
 	state := stateResult.State
 	authURL := stateResult.AuthURL
 
-	RegisterOAuthSession(state, "codebuddy-cn")
+	RegisterOAuthSession(state, region.Provider)
 
 	go func() {
 		pollCtx, cancelPoll := context.WithCancel(ctx)
 		defer cancelPoll()
-		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, "codebuddy-cn")
+		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, region.Provider)
 
 		fmt.Println("Waiting for CodeBuddy authorization...")
 		token, errWaitForAuthorization := client.WaitForToken(pollCtx, state)
 		if errWaitForAuthorization != nil {
-			if !IsOAuthSessionPending(state, "codebuddy-cn") {
+			if !IsOAuthSessionPending(state, region.Provider) {
 				return
 			}
 			SetOAuthSessionError(state, oauthSessionErrorWithCause("Authentication failed", errWaitForAuthorization))
 			fmt.Printf("Authentication failed: %v\n", errWaitForAuthorization)
 			return
 		}
-		if !IsOAuthSessionPending(state, "codebuddy-cn") {
+		if !IsOAuthSessionPending(state, region.Provider) {
 			return
 		}
 
 		// Account info and available models are optional extras.
 		account, accErr := client.GetAccountInfo(pollCtx, token.AccessToken, state)
 		if accErr != nil {
-			log.Warnf("codebuddy-cn: failed to fetch account info: %v", accErr)
+			log.Warnf("%s: failed to fetch account info: %v", region.Provider, accErr)
 			account = nil
 		}
 		var models []codebuddyauth.ModelInfo
 		if configData, cfgErr := client.FetchConfig(pollCtx, token.AccessToken, accountUIDValue(account)); cfgErr != nil {
-			log.Warnf("codebuddy-cn: failed to fetch model config: %v", cfgErr)
+			log.Warnf("%s: failed to fetch model config: %v", region.Provider, cfgErr)
 		} else if parsed, parseErr := codebuddyauth.ParseModels(configData); parseErr != nil {
-			log.Warnf("codebuddy-cn: failed to parse model config: %v", parseErr)
+			log.Warnf("%s: failed to parse model config: %v", region.Provider, parseErr)
 		} else {
 			models = parsed
 		}
 
-		tokenStorage := codebuddyauth.BuildTokenStorage(token, account, models)
+		tokenStorage := codebuddyauth.BuildTokenStorageForRegion(region, token, account, models)
 
 		metadata := map[string]any{
-			"type":          "codebuddy-cn",
+			"type":          region.Provider,
 			"access_token":  tokenStorage.AccessToken,
 			"refresh_token": tokenStorage.RefreshToken,
 			"token_type":    tokenStorage.TokenType,
@@ -822,20 +838,20 @@ func (h *Handler) RequestCodeBuddyToken(c *gin.Context) {
 			metadata["models_meta"] = tokenStorage.ModelsMeta
 		}
 
-		fileName := fmt.Sprintf("codebuddy-cn-%d.json", time.Now().UnixMilli())
-		label := "CodeBuddy User"
+		fileName := fmt.Sprintf("%s-%d.json", region.Provider, time.Now().UnixMilli())
+		label := region.Label + " User"
 		if nickname := strings.TrimSpace(tokenStorage.Nickname); nickname != "" {
 			label = nickname
 		}
 		record := &coreauth.Auth{
 			ID:       fileName,
-			Provider: "codebuddy-cn",
+			Provider: region.Provider,
 			FileName: fileName,
 			Label:    label,
 			Storage:  tokenStorage,
 			Metadata: metadata,
 		}
-		if errGuard := guardOAuthSessionPendingForSave(state, "codebuddy-cn"); errGuard != nil {
+		if errGuard := guardOAuthSessionPendingForSave(state, region.Provider); errGuard != nil {
 			return
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
@@ -850,7 +866,7 @@ func (h *Handler) RequestCodeBuddyToken(c *gin.Context) {
 		CompleteOAuthSession(state)
 	}()
 
-	response := gin.H{"status": "ok", "url": authURL, "state": state, "flow": "codebuddy-cn"}
+	response := gin.H{"status": "ok", "url": authURL, "state": state, "flow": region.Provider}
 	c.JSON(200, response)
 }
 

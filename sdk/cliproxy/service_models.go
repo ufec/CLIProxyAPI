@@ -146,7 +146,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	case "kimi":
 		models = registry.GetKimiModels()
 		models = applyExcludedModels(models, excluded)
-	case "codebuddy-cn":
+	case "codebuddy-cn", "codebuddy-intl":
 		models = buildCodeBuddyAuthModels(a)
 		models = applyExcludedModels(models, excluded)
 	case "dimagent":
@@ -810,10 +810,15 @@ func buildVertexCompatConfigModels(entry *config.VertexCompatKey) []*ModelInfo {
 
 // buildCodeBuddyAuthModels builds the CodeBuddy model catalog from per-auth
 // metadata synced from the upstream /v3/config endpoint at login and refresh
-// time. Models without metadata fall back to plain ID entries.
+// time. Models without metadata fall back to plain ID entries. The provider
+// identifier comes from the auth record so CN and intl deployments share it.
 func buildCodeBuddyAuthModels(auth *coreauth.Auth) []*ModelInfo {
 	if auth == nil || len(auth.Metadata) == 0 {
 		return nil
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if provider == "" {
+		provider = codebuddyauth.ProviderCN
 	}
 	now := time.Now().Unix()
 	if raw, ok := auth.Metadata["models_meta"].(string); ok {
@@ -829,10 +834,11 @@ func buildCodeBuddyAuthModels(auth *coreauth.Auth) []*ModelInfo {
 						ID:          m.ID,
 						Object:      "model",
 						Created:     now,
-						OwnedBy:     "codebuddy-cn",
-						Type:        "codebuddy-cn",
+						OwnedBy:     provider,
+						Type:        provider,
 						DisplayName: m.Name,
 						Name:        m.Name,
+						Credits:     m.Credits,
 					}
 					if m.MaxInputTokens > 0 {
 						info.ContextLength = m.MaxInputTokens
@@ -867,8 +873,8 @@ func buildCodeBuddyAuthModels(auth *coreauth.Auth) []*ModelInfo {
 			ID:      id,
 			Object:  "model",
 			Created: now,
-			OwnedBy: "codebuddy-cn",
-			Type:    "codebuddy-cn",
+			OwnedBy: provider,
+			Type:    provider,
 		})
 	}
 	return out

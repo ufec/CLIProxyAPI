@@ -37,6 +37,9 @@ type ModelInfo struct {
 	Type string `json:"type"`
 	// DisplayName is the human-readable name for the model
 	DisplayName string `json:"display_name,omitempty"`
+	// Credits is the upstream billing multiplier label (e.g. "x2.20 credits"),
+	// synced from the CodeBuddy /v3/config model catalog.
+	Credits string `json:"credits,omitempty"`
 	// Name is used for Gemini-style model names
 	Name string `json:"name,omitempty"`
 	// Version is the model version

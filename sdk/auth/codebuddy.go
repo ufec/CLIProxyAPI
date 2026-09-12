@@ -17,17 +17,34 @@ import (
 var codebuddyRefreshLead = time.Hour
 
 // CodeBuddyAuthenticator implements the state-based plugin auth login for
-// CodeBuddy (WorkBuddy, Tencent copilot).
-type CodeBuddyAuthenticator struct{}
+// CodeBuddy (WorkBuddy, Tencent copilot). The zero value targets the CN
+// deployment; set region for the international deployment.
+type CodeBuddyAuthenticator struct {
+	region *codebuddy.Region
+}
 
-// NewCodeBuddyAuthenticator constructs a new CodeBuddy authenticator.
+// NewCodeBuddyAuthenticator constructs a new CodeBuddy CN authenticator.
 func NewCodeBuddyAuthenticator() Authenticator {
 	return &CodeBuddyAuthenticator{}
 }
 
+// NewCodeBuddyIntlAuthenticator constructs a new CodeBuddy international
+// (workbuddy.ai) authenticator.
+func NewCodeBuddyIntlAuthenticator() Authenticator {
+	return &CodeBuddyAuthenticator{region: codebuddy.RegionIntl}
+}
+
+// regionOrDefault returns the authenticator's region, defaulting to CN.
+func (a CodeBuddyAuthenticator) regionOrDefault() *codebuddy.Region {
+	if a.region != nil {
+		return a.region
+	}
+	return codebuddy.RegionCN
+}
+
 // Provider returns the provider key for codebuddy.
-func (CodeBuddyAuthenticator) Provider() string {
-	return "codebuddy-cn"
+func (a CodeBuddyAuthenticator) Provider() string {
+	return a.regionOrDefault().Provider
 }
 
 // RefreshLead returns the duration before token expiry when refresh should occur.
@@ -49,12 +66,13 @@ func (a CodeBuddyAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 		ctx = context.Background()
 	}
 
-	client := codebuddy.NewClient(cfg, "")
+	region := a.regionOrDefault()
+	client := codebuddy.NewClientForRegion(cfg, "", region)
 
-	fmt.Println("Starting CodeBuddy CN (WorkBuddy) authentication...")
+	fmt.Printf("Starting %s (WorkBuddy) authentication...\n", region.Label)
 	state, err := client.FetchState(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("codebuddy-cn: failed to generate auth state: %w", err)
+		return nil, fmt.Errorf("%s: failed to generate auth state: %w", region.Provider, err)
 	}
 
 	fmt.Printf("\nTo authenticate, please visit:\n%s\n\n", state.AuthURL)
@@ -71,13 +89,13 @@ func (a CodeBuddyAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 	fmt.Println("Waiting for authorization (complete the login in the browser)...")
 	token, err := client.WaitForToken(ctx, state.State)
 	if err != nil {
-		return nil, fmt.Errorf("codebuddy-cn: %w", err)
+		return nil, fmt.Errorf("%s: %w", region.Provider, err)
 	}
 
 	// Account info is optional; the flow still succeeds without it.
 	account, accErr := client.GetAccountInfo(ctx, token.AccessToken, state.State)
 	if accErr != nil {
-		log.Warnf("codebuddy-cn: failed to fetch account info: %v", accErr)
+		log.Warnf("%s: failed to fetch account info: %v", region.Provider, accErr)
 		account = nil
 	}
 
@@ -85,17 +103,17 @@ func (a CodeBuddyAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 	var models []codebuddy.ModelInfo
 	configData, cfgErr := client.FetchConfig(ctx, token.AccessToken, accountUID(account))
 	if cfgErr != nil {
-		log.Warnf("codebuddy-cn: failed to fetch model config: %v", cfgErr)
+		log.Warnf("%s: failed to fetch model config: %v", region.Provider, cfgErr)
 	} else if parsed, parseErr := codebuddy.ParseModels(configData); parseErr != nil {
-		log.Warnf("codebuddy-cn: failed to parse model config: %v", parseErr)
+		log.Warnf("%s: failed to parse model config: %v", region.Provider, parseErr)
 	} else {
 		models = parsed
 	}
 
-	tokenStorage := codebuddy.BuildTokenStorage(token, account, models)
+	tokenStorage := codebuddy.BuildTokenStorageForRegion(region, token, account, models)
 
 	metadata := map[string]any{
-		"type":          "codebuddy-cn",
+		"type":          region.Provider,
 		"access_token":  tokenStorage.AccessToken,
 		"refresh_token": tokenStorage.RefreshToken,
 		"token_type":    tokenStorage.TokenType,
@@ -123,14 +141,14 @@ func (a CodeBuddyAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 		metadata["models_meta"] = tokenStorage.ModelsMeta
 	}
 
-	fileName := fmt.Sprintf("codebuddy-cn-%d.json", time.Now().UnixMilli())
+	fileName := fmt.Sprintf("%s-%d.json", region.Provider, time.Now().UnixMilli())
 
-	label := "CodeBuddy CN User"
+	label := region.Label + " User"
 	if nickname := strings.TrimSpace(tokenStorage.Nickname); nickname != "" {
 		label = nickname
 	}
 
-	fmt.Println("\nCodeBuddy CN authentication successful!")
+	fmt.Printf("\n%s (WorkBuddy) authentication successful!\n", region.Label)
 
 	return &coreauth.Auth{
 		ID:       fileName,

@@ -29,7 +29,7 @@ type TokenStorage struct {
 	Nickname string `json:"nickname,omitempty"`
 	// Expired is the RFC3339 timestamp when the access token expires.
 	Expired string `json:"expired,omitempty"`
-	// Type indicates the provider, always "codebuddy-cn" for this storage.
+	// Type indicates the provider identifier, e.g. "codebuddy-cn" or "codebuddy-intl".
 	Type string `json:"type"`
 	// EnabledModels lists the model IDs the account can call, synced from /v3/config.
 	EnabledModels []string `json:"enabled_models,omitempty"`
@@ -49,7 +49,9 @@ func (ts *TokenStorage) SetMetadata(meta map[string]any) {
 // SaveTokenToFile serializes the token storage to a JSON file.
 func (ts *TokenStorage) SaveTokenToFile(authFilePath string) error {
 	misc.LogSavingCredentials(authFilePath)
-	ts.Type = "codebuddy-cn"
+	if ts.Type == "" {
+		ts.Type = ProviderCN
+	}
 
 	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %v", err)

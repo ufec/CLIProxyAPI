@@ -36,6 +36,17 @@ func GenerateHexID(n int) string {
 // endpoint requires. Without them the upstream routes the request through the
 // strictest content-safety path and rejects otherwise harmless input.
 func ApplyChatHeaders(req *http.Request, uid string) {
+	RegionCN.ApplyChatHeaders(req, uid)
+}
+
+// ApplyChatHeaders sets the session and identity headers the CodeBuddy chat
+// endpoint requires, using the region's branding. Without them the upstream
+// routes the request through the strictest content-safety path and rejects
+// otherwise harmless input.
+func (r *Region) ApplyChatHeaders(req *http.Request, uid string) {
+	if r == nil {
+		r = RegionCN
+	}
 	req.Header.Set("X-Conversation-ID", GenerateRequestUUID())
 	req.Header.Set("X-Conversation-Request-ID", GenerateRequestUUID())
 	req.Header.Set("X-Conversation-Message-ID", GenerateRequestUUID())
@@ -44,12 +55,12 @@ func ApplyChatHeaders(req *http.Request, uid string) {
 	req.Header.Set("X-Agent-Purpose", "conversation_topic")
 	req.Header.Set("X-IDE-Type", "WorkBuddy")
 	req.Header.Set("X-IDE-Name", "WorkBuddy")
-	req.Header.Set("X-IDE-Version", "5.2.5")
+	req.Header.Set("X-IDE-Version", r.IDEVersion)
 	req.Header.Set("X-Private-Data", "false")
-	req.Header.Set("X-Domain", DefaultDomain)
+	req.Header.Set("X-Domain", r.APIDomain)
 	req.Header.Set("X-Product", "SaaS")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("User-Agent", ClientUserAgent)
+	req.Header.Set("User-Agent", r.UserAgent)
 	if uid = strings.TrimSpace(uid); uid != "" {
 		req.Header.Set("X-User-Id", uid)
 	}

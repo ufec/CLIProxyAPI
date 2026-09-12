@@ -209,6 +209,7 @@ func baselineExecutorAuths() []*coreauth.Auth {
 		"antigravity",
 		"kimi",
 		"codebuddy-cn",
+		"codebuddy-intl",
 		"dimagent",
 		"xai",
 		"openai-compatibility",
@@ -296,6 +297,8 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(cfg))
 	case "codebuddy-cn":
 		s.coreManager.RegisterExecutor(executor.NewCodeBuddyExecutor(cfg))
+	case "codebuddy-intl":
+		s.coreManager.RegisterExecutor(executor.NewCodeBuddyIntlExecutor(cfg))
 	case "dimagent":
 		s.coreManager.RegisterExecutor(executor.NewDimAgentExecutor(cfg))
 	case "xai":

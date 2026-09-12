@@ -9,8 +9,19 @@ import (
 // response, account info, and the parsed /v3/config models. It is shared by
 // the CLI login flow and the management API login flow.
 func BuildTokenStorage(token *TokenResponse, account *AccountInfo, models []ModelInfo) *TokenStorage {
+	return BuildTokenStorageForRegion(nil, token, account, models)
+}
+
+// BuildTokenStorageForRegion assembles the token storage for the given region,
+// stamping the storage with the region's provider identifier. A nil region
+// falls back to the CN deployment.
+func BuildTokenStorageForRegion(region *Region, token *TokenResponse, account *AccountInfo, models []ModelInfo) *TokenStorage {
+	if region == nil {
+		region = RegionCN
+	}
 	storage := &TokenStorage{
 		TokenType: "Bearer",
+		Type:      region.Provider,
 	}
 	if token != nil {
 		storage.AccessToken = token.AccessToken

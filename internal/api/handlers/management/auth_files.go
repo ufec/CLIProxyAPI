@@ -173,13 +173,17 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 		return
 	}
 
-	// Try to find auth ID via authManager
-	var authID string
+	// Try to find the auth record via authManager.
+	var (
+		authID   string
+		authMeta map[string]any
+	)
 	if h.authManager != nil {
 		auths := h.authManager.List()
 		for _, auth := range auths {
 			if auth.FileName == name || auth.ID == name {
 				authID = auth.ID
+				authMeta = auth.Metadata
 				break
 			}
 		}
@@ -194,6 +198,7 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 	models := reg.GetModelsForClient(authID)
 
 	result := make([]gin.H, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
 	for _, m := range models {
 		entry := gin.H{
 			"id": m.ID,
@@ -201,16 +206,68 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 		if m.DisplayName != "" {
 			entry["display_name"] = m.DisplayName
 		}
+		if m.Credits != "" {
+			entry["credits"] = m.Credits
+		}
 		if m.Type != "" {
 			entry["type"] = m.Type
 		}
 		if m.OwnedBy != "" {
 			entry["owned_by"] = m.OwnedBy
 		}
+		seen[strings.ToLower(m.ID)] = struct{}{}
 		result = append(result, entry)
 	}
 
+	// Models disabled via per-credential exclusion are removed from the routing
+	// registry, so the list above omits them. The management UI still needs their
+	// metadata (display name, billing credits) to render the excluded-model
+	// picker, so merge the credential's full catalog metadata back in.
+	result = appendMissingCatalogModels(result, authMeta, seen)
+
 	c.JSON(200, gin.H{"models": result})
+}
+
+// appendMissingCatalogModels adds entries from the credential's synced model
+// catalog (metadata key "models_meta") that are absent from the registry list.
+// The catalog is a JSON array of objects carrying at least "id"; "name" and
+// "credits" are copied when present.
+func appendMissingCatalogModels(result []gin.H, metadata map[string]any, seen map[string]struct{}) []gin.H {
+	if len(metadata) == 0 {
+		return result
+	}
+	raw, ok := metadata["models_meta"].(string)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return result
+	}
+	var catalog []map[string]any
+	if err := json.Unmarshal([]byte(raw), &catalog); err != nil {
+		return result
+	}
+	for _, item := range catalog {
+		id, _ := item["id"].(string)
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[strings.ToLower(id)]; exists {
+			continue
+		}
+		entry := gin.H{"id": id}
+		if name, _ := item["name"].(string); strings.TrimSpace(name) != "" {
+			entry["display_name"] = strings.TrimSpace(name)
+		}
+		if credits, _ := item["credits"].(string); strings.TrimSpace(credits) != "" {
+			entry["credits"] = strings.TrimSpace(credits)
+		}
+		if provider, _ := metadata["type"].(string); strings.TrimSpace(provider) != "" {
+			entry["type"] = strings.TrimSpace(provider)
+			entry["owned_by"] = strings.TrimSpace(provider)
+		}
+		seen[strings.ToLower(id)] = struct{}{}
+		result = append(result, entry)
+	}
+	return result
 }
 
 // List auth files from disk when the auth manager is unavailable.

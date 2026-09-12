@@ -82,6 +82,7 @@ func main() {
 	var kimiLogin bool
 	var xaiLogin bool
 	var codebuddyCnLogin bool
+	var codebuddyIntlLogin bool
 	var dimagentLogin bool
 	var vertexImport string
 	var vertexImportPrefix string
@@ -103,6 +104,7 @@ func main() {
 	flag.BoolVar(&kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
 	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
 	flag.BoolVar(&codebuddyCnLogin, "codebuddy-cn-login", false, "Login to CodeBuddy CN (WorkBuddy) using OAuth")
+	flag.BoolVar(&codebuddyIntlLogin, "codebuddy-intl-login", false, "Login to CodeBuddy Intl (WorkBuddy, workbuddy.ai) using OAuth")
 	flag.BoolVar(&dimagentLogin, "dimagent-login", false, "Login to DimAgent using OAuth")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
@@ -592,7 +594,7 @@ func main() {
 		CallbackPort: oauthCallbackPort,
 	}
 
-	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin || codebuddyCnLogin || dimagentLogin
+	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin || codebuddyCnLogin || codebuddyIntlLogin || dimagentLogin
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
 	exampleAPIKeySafeMode := shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode)
@@ -669,6 +671,9 @@ func main() {
 	} else if codebuddyCnLogin {
 		// Handle CodeBuddy (WorkBuddy) login
 		cmd.DoCodeBuddyLogin(cfg, options)
+	} else if codebuddyIntlLogin {
+		// Handle CodeBuddy Intl (workbuddy.ai) login
+		cmd.DoCodeBuddyIntlLogin(cfg, options)
 	} else if dimagentLogin {
 		// Handle DimAgent login
 		cmd.DoDimAgentLogin(cfg, options)

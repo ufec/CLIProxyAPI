@@ -68,7 +68,13 @@ cliproxyapi-server.zip
 deploy/
 deploy-package/
 cloudflare-worker/
+# Local provider OAuth/network analysis scratch space (oauth-service/<provider_name>/)
+oauth-service/
+# Legacy locations kept ignored so stale copies never get committed
 dimagent-oauth-service/
+codebuddy-ai-oauth-service/
+# Management panel backups of the locally deployed build
+management.html.backup-*
 
 
 # Local LLM Wiki vault

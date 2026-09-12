@@ -3,7 +3,9 @@ package executor
 import (
 	"testing"
 
+	codebuddyauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codebuddy"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/tidwall/gjson"
 )
 
 func TestNormalizeCodeBuddyUpstreamModel(t *testing.T) {
@@ -64,12 +66,15 @@ func TestCodeBuddyUID(t *testing.T) {
 }
 
 func TestCodeBuddyBaseURL(t *testing.T) {
-	if got := codebuddyBaseURL(nil); got == "" {
-		t.Error("nil auth should fall back to the default base URL")
+	if got := codebuddyBaseURL(nil, codebuddyauth.RegionCN); got != codebuddyauth.DefaultBaseURL {
+		t.Errorf("nil auth base URL = %q, want %q", got, codebuddyauth.DefaultBaseURL)
+	}
+	if got := codebuddyBaseURL(nil, codebuddyauth.RegionIntl); got != codebuddyauth.IntlBaseURL {
+		t.Errorf("intl base URL = %q, want %q", got, codebuddyauth.IntlBaseURL)
 	}
 
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": "https://example.com/"}, Metadata: map[string]any{}}
-	if got := codebuddyBaseURL(auth); got != "https://example.com/" {
+	if got := codebuddyBaseURL(auth, codebuddyauth.RegionCN); got != "https://example.com/" {
 		t.Errorf("base_url = %q, want https://example.com/", got)
 	}
 }
@@ -98,4 +103,44 @@ func TestIsCodeBuddySSEHeartbeat(t *testing.T) {
 			t.Errorf("unexpected heartbeat detection for %q", line)
 		}
 	}
+}
+
+func TestEnsureLeadingSystemMessage(t *testing.T) {
+	newExecutor := func(region *codebuddyauth.Region) *CodeBuddyExecutor {
+		return newCodeBuddyExecutorForRegion(nil, region)
+	}
+
+	t.Run("intl prepends system message", func(t *testing.T) {
+		body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+		out := newExecutor(codebuddyauth.RegionIntl).ensureLeadingSystemMessage(body)
+		roles := gjson.GetBytes(out, "messages.#.role").Array()
+		if len(roles) != 2 || roles[0].String() != "system" || roles[1].String() != "user" {
+			t.Fatalf("unexpected roles after inject: %v", roles)
+		}
+		if got := gjson.GetBytes(out, "messages.0.content").String(); got == "" {
+			t.Fatal("injected system message must not be empty")
+		}
+		if got := gjson.GetBytes(out, "messages.1.content").String(); got != "hi" {
+			t.Fatalf("user content changed: %q", got)
+		}
+	})
+
+	t.Run("intl keeps existing system message", func(t *testing.T) {
+		body := []byte(`{"model":"m","messages":[{"role":"system","content":"sys"},{"role":"user","content":"hi"}]}`)
+		out := newExecutor(codebuddyauth.RegionIntl).ensureLeadingSystemMessage(body)
+		if gjson.GetBytes(out, "messages.0.content").String() != "sys" {
+			t.Fatal("existing system message must be kept")
+		}
+		if len(gjson.GetBytes(out, "messages").Array()) != 2 {
+			t.Fatal("message count changed")
+		}
+	})
+
+	t.Run("cn payload unchanged", func(t *testing.T) {
+		body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+		out := newExecutor(codebuddyauth.RegionCN).ensureLeadingSystemMessage(body)
+		if gjson.GetBytes(out, "messages.0.role").String() != "user" {
+			t.Fatal("CN payload must stay unchanged")
+		}
+	})
 }

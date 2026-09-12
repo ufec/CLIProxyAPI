@@ -180,6 +180,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
 		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
 		mgmt.GET("/codebuddy-cn-auth-url", s.mgmt.RequestCodeBuddyToken)
+		mgmt.GET("/codebuddy-intl-auth-url", s.mgmt.RequestCodeBuddyIntlToken)
 		mgmt.GET("/dimagent-auth-url", s.mgmt.RequestDimAgentToken)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 		mgmt.DELETE("/oauth-session", s.mgmt.CancelAuthSession)
