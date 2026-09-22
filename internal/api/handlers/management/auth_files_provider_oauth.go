@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	dimagentauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/dimagent"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
@@ -717,6 +718,94 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 		response["expires_in"] = deviceFlow.ExpiresIn
 	}
 	c.JSON(200, response)
+}
+
+// RequestQoderToken initiates the Qoder device flow (qoder.com -> dt- -> jt-).
+func (h *Handler) RequestQoderToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing Qoder authentication...")
+
+	state := fmt.Sprintf("qdr-%d", time.Now().UnixNano())
+	flow := qoderauth.NewOAuthDeviceFlow(nil)
+	authURL, verifier, nonce, errBuild := flow.AuthorizationURL()
+	if errBuild != nil {
+		log.Errorf("Failed to build Qoder authorization url: %v", errBuild)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build authorization url"})
+		return
+	}
+
+	RegisterOAuthSession(state, "qoder")
+
+	go func() {
+		pollCtx, cancelPoll := context.WithCancel(ctx)
+		defer cancelPoll()
+		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, "qoder")
+
+		fmt.Println("Waiting for Qoder authentication...")
+		dt, errPoll := flow.PollDeviceToken(pollCtx, nonce, verifier, 2*time.Second)
+		if errPoll != nil {
+			if !IsOAuthSessionPending(state, "qoder") {
+				return
+			}
+			log.Errorf("Qoder authentication failed: %v", errPoll)
+			SetOAuthSessionError(state, oauthSessionErrorWithCause("Authentication failed", errPoll))
+			return
+		}
+		if !IsOAuthSessionPending(state, "qoder") {
+			return
+		}
+		jt, errJob := flow.JobToken(pollCtx, dt.Token)
+		if errJob != nil {
+			if !IsOAuthSessionPending(state, "qoder") {
+				return
+			}
+			log.Errorf("Qoder job token exchange failed: %v", errJob)
+			SetOAuthSessionError(state, oauthSessionErrorWithCause("Job token exchange failed", errJob))
+			return
+		}
+		if !IsOAuthSessionPending(state, "qoder") {
+			return
+		}
+
+		uid := strings.TrimSpace(dt.UserID)
+		fileName := fmt.Sprintf("qoder-%d.json", time.Now().UnixMilli())
+		metadata := map[string]any{
+			"type":                 "qoder",
+			"access_token":         jt.Token,
+			"security_oauth_token": jt.Token,
+			"uid":                  uid,
+			"x-gw-user-id":         uid,
+			"timestamp":            time.Now().UnixMilli(),
+		}
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "qoder",
+			FileName: fileName,
+			Label:    "Qoder User",
+			Metadata: metadata,
+			Attributes: map[string]string{
+				"uid":                  uid,
+				"security_oauth_token": jt.Token,
+			},
+		}
+		if errGuard := guardOAuthSessionPendingForSave(state, "qoder"); errGuard != nil {
+			return
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save Qoder authentication tokens: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use Qoder services through this CLI")
+		CompleteOAuthSession(state)
+	}()
+
+	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state, "flow": "device"})
 }
 
 // watchOAuthSessionCancel cancels pollCtx once the OAuth session is no longer pending.

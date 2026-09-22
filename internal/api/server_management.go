@@ -182,6 +182,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/codebuddy-cn-auth-url", s.mgmt.RequestCodeBuddyToken)
 		mgmt.GET("/codebuddy-intl-auth-url", s.mgmt.RequestCodeBuddyIntlToken)
 		mgmt.GET("/dimagent-auth-url", s.mgmt.RequestDimAgentToken)
+		mgmt.GET("/qoder-auth-url", s.mgmt.RequestQoderToken)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 		mgmt.DELETE("/oauth-session", s.mgmt.CancelAuthSession)
 	}

@@ -295,6 +295,8 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(cfg))
 	case "kimi":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(cfg))
+	case "qoder":
+		s.coreManager.RegisterExecutor(executor.NewQoderExecutor(cfg))
 	case "codebuddy-cn":
 		s.coreManager.RegisterExecutor(executor.NewCodeBuddyExecutor(cfg))
 	case "codebuddy-intl":

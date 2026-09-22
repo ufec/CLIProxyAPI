@@ -146,6 +146,9 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	case "kimi":
 		models = registry.GetKimiModels()
 		models = applyExcludedModels(models, excluded)
+	case "qoder":
+		models = registry.GetQoderModels()
+		models = applyExcludedModels(models, excluded)
 	case "codebuddy-cn", "codebuddy-intl":
 		models = buildCodeBuddyAuthModels(a)
 		models = applyExcludedModels(models, excluded)

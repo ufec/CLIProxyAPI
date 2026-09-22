@@ -84,6 +84,7 @@ func main() {
 	var codebuddyCnLogin bool
 	var codebuddyIntlLogin bool
 	var dimagentLogin bool
+	var qoderLogin bool
 	var vertexImport string
 	var vertexImportPrefix string
 	var configPath string
@@ -106,6 +107,7 @@ func main() {
 	flag.BoolVar(&codebuddyCnLogin, "codebuddy-cn-login", false, "Login to CodeBuddy CN (WorkBuddy) using OAuth")
 	flag.BoolVar(&codebuddyIntlLogin, "codebuddy-intl-login", false, "Login to CodeBuddy Intl (WorkBuddy, workbuddy.ai) using OAuth")
 	flag.BoolVar(&dimagentLogin, "dimagent-login", false, "Login to DimAgent using OAuth")
+	flag.BoolVar(&qoderLogin, "qoder-login", false, "Login to Qoder using OAuth")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
@@ -594,7 +596,7 @@ func main() {
 		CallbackPort: oauthCallbackPort,
 	}
 
-	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin || codebuddyCnLogin || codebuddyIntlLogin || dimagentLogin
+	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin || codebuddyCnLogin || codebuddyIntlLogin || dimagentLogin || qoderLogin
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
 	exampleAPIKeySafeMode := shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode)
@@ -677,6 +679,9 @@ func main() {
 	} else if dimagentLogin {
 		// Handle DimAgent login
 		cmd.DoDimAgentLogin(cfg, options)
+	} else if qoderLogin {
+		// Handle Qoder login
+		cmd.DoQoderLogin(cfg, options)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {

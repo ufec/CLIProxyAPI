@@ -3642,7 +3642,6 @@
         "text"
       ]
     }
-
   ],
   "xai": [
     {
@@ -3872,6 +3871,44 @@
       "description": "xAI Composer 2.5 Fast model for the Responses API.",
       "context_length": 200000,
       "max_completion_tokens": 32768
+    }
+  ],
+  "qoder": [
+    {
+      "id": "qoder/qwen3.8-flash",
+      "object": "model",
+      "created": 1752192000,
+      "owned_by": "qoder",
+      "type": "qoder",
+      "display_name": "Qoder Qwen3.8-Flash",
+      "name": "qoder/qwen3.8-flash",
+      "description": "Qoder agent chat model (Qwen3.8-Flash via qfmodel)",
+      "context_length": 200000,
+      "max_completion_tokens": 32000,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "qoder/qwen3-max",
+      "object": "model",
+      "created": 1752192000,
+      "owned_by": "qoder",
+      "type": "qoder",
+      "display_name": "Qoder Qwen3-Max",
+      "name": "qoder/qwen3-max",
+      "description": "Qoder agent chat model (Qwen3-Max via qfmodel)",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     }
   ]
 }

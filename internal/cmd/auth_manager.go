@@ -21,6 +21,7 @@ func newAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewCodeBuddyAuthenticator(),
 		sdkAuth.NewCodeBuddyIntlAuthenticator(),
 		sdkAuth.NewDimAgentAuthenticator(),
+		sdkAuth.NewQoderAuthenticator(),
 	)
 	return manager
 }

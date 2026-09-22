@@ -89,6 +89,17 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 		if candidate.value == "" {
 			continue
 		}
+		// Qoder access tokens start with "jt-" and are validated by the Qoder executor upstream;
+		// accept them here so requests with Bearer jt-* pass the proxy auth layer.
+		if strings.HasPrefix(candidate.value, "jt-") {
+			return &sdkaccess.Result{
+				Provider:  p.Identifier(),
+				Principal: candidate.value,
+				Metadata: map[string]string{
+					"source": candidate.source,
+				},
+			}, nil
+		}
 		if _, ok := p.keys[candidate.value]; ok {
 			return &sdkaccess.Result{
 				Provider:  p.Identifier(),
