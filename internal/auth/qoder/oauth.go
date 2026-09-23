@@ -18,8 +18,60 @@ import (
 // DeviceTokenResponse is the dt- device token payload.
 type DeviceTokenResponse struct {
 	Token        string `json:"token"`
+	DeviceToken  string `json:"device_token,omitempty"`
 	RefreshToken string `json:"refresh_token"`
 	UserID       string `json:"user_id"`
+}
+
+// DeviceTokenRefreshHTTPError preserves a rejected refresh status without response data.
+type DeviceTokenRefreshHTTPError struct {
+	StatusCode int
+}
+
+func (e *DeviceTokenRefreshHTTPError) Error() string {
+	return fmt.Sprintf("qoder device token refresh: upstream HTTP %d", e.StatusCode)
+}
+
+// RefreshDeviceToken rotates the device token used by account endpoints.
+func RefreshDeviceToken(ctx context.Context, client *http.Client, endpoint, refreshToken string) (*DeviceTokenResponse, error) {
+	if strings.TrimSpace(refreshToken) == "" {
+		return nil, fmt.Errorf("qoder device token refresh: missing refresh token; sign in again")
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 20 * time.Second}
+	}
+	if endpoint == "" {
+		endpoint = OpenAPIHost + DeviceTokenRefreshPath
+	}
+	body, err := json.Marshal(map[string]string{"refresh_token": refreshToken})
+	if err != nil {
+		return nil, fmt.Errorf("qoder device token refresh: marshal: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, fmt.Errorf("qoder device token refresh: create request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("qoder device token refresh: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, &DeviceTokenRefreshHTTPError{StatusCode: resp.StatusCode}
+	}
+	var token DeviceTokenResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&token); err != nil {
+		return nil, fmt.Errorf("qoder device token refresh: decode: %w", err)
+	}
+	if token.Token == "" {
+		token.Token = token.DeviceToken
+	}
+	if strings.TrimSpace(token.Token) == "" || strings.TrimSpace(token.RefreshToken) == "" {
+		return nil, fmt.Errorf("qoder device token refresh: incomplete token pair")
+	}
+	return &token, nil
 }
 
 // JobTokenResponse is the jt- task token payload.

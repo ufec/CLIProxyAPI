@@ -60,6 +60,10 @@ type Handler struct {
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
 	pluginStoreRateLimiter  *pluginstore.GitHubRateLimiter
 	pluginReleases          pluginReleaseCache
+	qoderRefreshMu          sync.Mutex
+	qoderUsageClient        *http.Client
+	qoderUsageBaseURL       string
+	qoderDeviceRefreshURL   string
 }
 
 type configReloadSnapshot struct {

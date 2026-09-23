@@ -31,6 +31,12 @@ type ModelInfo struct {
 	MaxOutputTokens int `json:"-"`
 }
 
+// FormatPriceFactorCredits formats the Qoder billing multiplier for the model UI.
+// A missing price_factor decodes to zero and means the model is free.
+func FormatPriceFactorCredits(priceFactor float64) string {
+	return fmt.Sprintf("x%.2f credits", priceFactor)
+}
+
 // ModelsResponse is the envelope of the model listing endpoint. It carries a
 // "chat" array (the primary chat models) plus other sections (assistant,
 // inline, quest, ...) that the gateway does not expose.

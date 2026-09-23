@@ -20,7 +20,7 @@ func TestAppendMissingCatalogModelsQoder(t *testing.T) {
 		"models_meta": `[
 			{"key":"auto","display_name":"Auto","enable":false},
 			{"key":"qmodel_38max","display_name":"Qwen3.8-Max","enable":true},
-			{"key":"qfmodel","display_name":"Qwen3.8-Flash","enable":true}
+			{"key":"qfmodel","display_name":"Qwen3.8-Flash","enable":true,"price_factor":0.5}
 		]`,
 	}
 	result := appendMissingCatalogModels(nil, metadata, map[string]struct{}{
@@ -34,6 +34,9 @@ func TestAppendMissingCatalogModelsQoder(t *testing.T) {
 	}
 	if result[0]["type"] != "qoder" || result[0]["owned_by"] != "qoder" {
 		t.Fatalf("missing Qoder provider metadata: %v", result[0])
+	}
+	if result[0]["credits"] != "x0.50 credits" {
+		t.Fatalf("missing Qoder price factor: %v", result[0])
 	}
 }
 
@@ -68,6 +71,9 @@ func TestGetAuthFileModelsQoderMetadataWithoutRegistry(t *testing.T) {
 	}
 	if len(response.Models) != 1 || response.Models[0]["id"] != "qoder/qfmodel" {
 		t.Fatalf("models = %v", response.Models)
+	}
+	if response.Models[0]["credits"] != "x0.00 credits" {
+		t.Fatalf("missing price must be free: %v", response.Models[0])
 	}
 }
 

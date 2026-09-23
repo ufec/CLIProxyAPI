@@ -786,6 +786,8 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 			"uid":                  uid,
 			"x-gw-user-id":         uid,
 			"timestamp":            time.Now().UnixMilli(),
+			"device_token":         dt.Token,
+			"device_refresh_token": dt.RefreshToken,
 		}
 		if jt.RefreshToken != "" {
 			metadata["refresh_token"] = jt.RefreshToken

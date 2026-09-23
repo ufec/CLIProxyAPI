@@ -43,3 +43,21 @@ func TestRefreshJobTokenMissingCredential(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestRefreshDeviceToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != DeviceTokenRefreshPath || r.Header.Get("Authorization") != "" {
+			t.Errorf("unexpected device refresh request: %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["refresh_token"] != "drt-old" {
+			t.Error("device refresh body mismatch")
+		}
+		_, _ = w.Write([]byte(`{"device_token":"dt-new","refresh_token":"drt-new"}`))
+	}))
+	defer server.Close()
+	token, err := RefreshDeviceToken(context.Background(), server.Client(), server.URL+DeviceTokenRefreshPath, "drt-old")
+	if err != nil || token.Token != "dt-new" || token.RefreshToken != "drt-new" {
+		t.Fatalf("rotated token = %#v, error = %v", token, err)
+	}
+}

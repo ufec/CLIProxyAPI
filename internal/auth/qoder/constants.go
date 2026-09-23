@@ -35,6 +35,7 @@ const (
 const (
 	DeviceSelectAccountsPath = "/device/selectAccounts"
 	DeviceTokenPollPath      = "/api/v1/deviceToken/poll"
+	DeviceTokenRefreshPath   = "/api/v1/deviceToken/refresh"
 	JobTokenPath             = "/api/v1/me/jobToken"
 	JobTokenRefreshPath      = "/api/v1/jobToken/refresh"
 	// AgentChatGenerationPath is the SSE chat endpoint (Encode=1 => custom

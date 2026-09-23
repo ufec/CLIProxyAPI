@@ -987,6 +987,7 @@ func buildQoderAuthModels(auth *coreauth.Auth) []*ModelInfo {
 						Type:        qoderauth.ProviderKey,
 						DisplayName: display,
 						Name:        display,
+						Credits:     qoderauth.FormatPriceFactorCredits(m.PriceFactor),
 					}
 					if m.MaxInputTokens > 0 {
 						info.ContextLength = m.MaxInputTokens

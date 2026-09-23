@@ -326,6 +326,9 @@ func appendMissingCatalogModels(result []gin.H, metadata map[string]any, seen ma
 		}
 		if credits, _ := item["credits"].(string); strings.TrimSpace(credits) != "" {
 			entry["credits"] = strings.TrimSpace(credits)
+		} else if metadata["type"] == qoderauth.ProviderKey {
+			priceFactor, _ := item["price_factor"].(float64)
+			entry["credits"] = qoderauth.FormatPriceFactorCredits(priceFactor)
 		}
 		if provider, _ := metadata["type"].(string); strings.TrimSpace(provider) != "" {
 			entry["type"] = strings.TrimSpace(provider)

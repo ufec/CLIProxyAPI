@@ -69,6 +69,20 @@ func TestModelIDFormat(t *testing.T) {
 	}
 }
 
+func TestFormatPriceFactorCredits(t *testing.T) {
+	for _, tc := range []struct {
+		factor float64
+		want   string
+	}{
+		{factor: 0, want: "x0.00 credits"},
+		{factor: 0.5, want: "x0.50 credits"},
+	} {
+		if got := FormatPriceFactorCredits(tc.factor); got != tc.want {
+			t.Errorf("factor %v: got %q, want %q", tc.factor, got, tc.want)
+		}
+	}
+}
+
 func TestBuildModelsURL(t *testing.T) {
 	got := BuildModelsURL("https://api3.qoder.sh")
 	if !strings.HasSuffix(got, "/algo/api/v2/model/list?Encode=1") {

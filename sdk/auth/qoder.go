@@ -92,6 +92,8 @@ func (a QoderAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 		"x-gw-user-id":          uid,
 		"timestamp":             time.Now().UnixMilli(),
 		"redirect_uri_protocol": "device",
+		"device_token":          dt.Token,
+		"device_refresh_token":  dt.RefreshToken,
 	}
 	if jt.RefreshToken != "" {
 		metadata["refresh_token"] = jt.RefreshToken

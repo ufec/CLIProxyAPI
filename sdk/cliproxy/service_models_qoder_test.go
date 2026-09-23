@@ -13,7 +13,7 @@ func TestBuildQoderAuthModelsFromMetadata(t *testing.T) {
 			"enabled_models": []any{"qoder/qfmodel", "qoder/qmodel_38max"},
 			"models_meta": `[
 				{"key":"qfmodel","display_name":"Qwen3.8-Flash","enable":true,"is_vl":true,"max_input_tokens":180000},
-				{"key":"qmodel_38max","display_name":"Qwen3.8-Max","enable":true,"is_reasoning":true,"max_input_tokens":180000}
+				{"key":"qmodel_38max","display_name":"Qwen3.8-Max","enable":true,"is_reasoning":true,"max_input_tokens":180000,"price_factor":0.5}
 			]`,
 		},
 	}
@@ -27,6 +27,9 @@ func TestBuildQoderAuthModelsFromMetadata(t *testing.T) {
 	}
 	if models[0].OwnedBy != "qoder" || models[0].Type != "qoder" {
 		t.Errorf("owned_by/type not qoder: %+v", models[0])
+	}
+	if models[0].Credits != "x0.00 credits" || models[1].Credits != "x0.50 credits" {
+		t.Errorf("price factors not mapped: %q, %q", models[0].Credits, models[1].Credits)
 	}
 	if models[0].ContextLength != 180000 || models[0].MaxContextLength != 180000 {
 		t.Errorf("context limits not mapped: %+v", models[0])
