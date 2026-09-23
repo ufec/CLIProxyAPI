@@ -9,6 +9,7 @@ import (
 
 	codebuddyauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codebuddy"
 	dimagentauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/dimagent"
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -147,8 +148,13 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = registry.GetKimiModels()
 		models = applyExcludedModels(models, excluded)
 	case "qoder":
-		models = registry.GetQoderModels()
+		models = buildQoderAuthModels(a)
 		models = applyExcludedModels(models, excluded)
+		if len(models) == 0 {
+			// Fall back to the static catalog (embedded or remote models.json)
+			// when the auth has no live model metadata yet.
+			models = applyExcludedModels(registry.GetQoderModels(), excluded)
+		}
 	case "codebuddy-cn", "codebuddy-intl":
 		models = buildCodeBuddyAuthModels(a)
 		models = applyExcludedModels(models, excluded)
@@ -945,6 +951,80 @@ func buildDimAgentAuthModels(auth *coreauth.Auth) []*ModelInfo {
 			Created: now,
 			OwnedBy: dimagentauth.ProviderKey,
 			Type:    dimagentauth.ProviderKey,
+		})
+	}
+	return out
+}
+
+// buildQoderAuthModels builds the Qoder model catalog from per-auth live model
+// metadata captured at login (GET /algo/api/v2/model/list). When that metadata
+// is unavailable it returns nil so the caller can fall back to the static
+// catalog.
+func buildQoderAuthModels(auth *coreauth.Auth) []*ModelInfo {
+	if auth == nil || len(auth.Metadata) == 0 {
+		return nil
+	}
+	now := time.Now().Unix()
+	if raw, ok := auth.Metadata["models_meta"].(string); ok {
+		if trimmed := strings.TrimSpace(raw); trimmed != "" {
+			var meta []qoderauth.ModelInfo
+			if err := json.Unmarshal([]byte(trimmed), &meta); err == nil && len(meta) > 0 {
+				out := make([]*ModelInfo, 0, len(meta))
+				for i := range meta {
+					m := &meta[i]
+					if !m.Enable || !qoderauth.IsRoutableModel(m.Key) {
+						continue
+					}
+					display := m.DisplayName
+					if display == "" {
+						display = m.Key
+					}
+					info := &ModelInfo{
+						ID:          m.ID(),
+						Object:      "model",
+						Created:     now,
+						OwnedBy:     qoderauth.ProviderKey,
+						Type:        qoderauth.ProviderKey,
+						DisplayName: display,
+						Name:        display,
+					}
+					if m.MaxInputTokens > 0 {
+						info.ContextLength = m.MaxInputTokens
+						info.MaxContextLength = m.MaxInputTokens
+						info.InputTokenLimit = m.MaxInputTokens
+					}
+					if m.MaxOutputTokens > 0 {
+						info.MaxCompletionTokens = m.MaxOutputTokens
+						info.OutputTokenLimit = m.MaxOutputTokens
+					}
+					if m.IsVL {
+						info.SupportedInputModalities = append(info.SupportedInputModalities, "image")
+					}
+					out = append(out, info)
+				}
+				if len(out) > 0 {
+					return out
+				}
+			}
+		}
+	}
+	// Fall back to the enabled_models id list captured at login (no model
+	// metadata available, e.g. older auth files).
+	ids, ok := metadataStringSlice(auth.Metadata["enabled_models"])
+	if !ok {
+		return nil
+	}
+	out := make([]*ModelInfo, 0, len(ids))
+	for _, id := range ids {
+		if !qoderauth.IsRoutableModel(strings.TrimPrefix(id, "qoder/")) {
+			continue
+		}
+		out = append(out, &ModelInfo{
+			ID:      id,
+			Object:  "model",
+			Created: now,
+			OwnedBy: qoderauth.ProviderKey,
+			Type:    qoderauth.ProviderKey,
 		})
 	}
 	return out

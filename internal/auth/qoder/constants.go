@@ -36,6 +36,7 @@ const (
 	DeviceSelectAccountsPath = "/device/selectAccounts"
 	DeviceTokenPollPath      = "/api/v1/deviceToken/poll"
 	JobTokenPath             = "/api/v1/me/jobToken"
+	JobTokenRefreshPath      = "/api/v1/jobToken/refresh"
 	// AgentChatGenerationPath is the SSE chat endpoint (Encode=1 => custom
 	// base64 body codec).
 	AgentChatGenerationPath = "/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
@@ -48,6 +49,9 @@ func CredentialFileName(email string) string {
 	}
 	return "qoder-" + email + ".json"
 }
+
+// ProviderKey is the provider identifier used across the gateway.
+const ProviderKey = "qoder"
 
 // NewID returns a fresh UUID without dashes.
 func NewID() string {

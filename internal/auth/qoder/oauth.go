@@ -24,7 +24,50 @@ type DeviceTokenResponse struct {
 
 // JobTokenResponse is the jt- task token payload.
 type JobTokenResponse struct {
-	Token string `json:"token"`
+	Token        string `json:"token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+// RefreshJobToken exchanges a job refresh token for a new job token pair.
+func RefreshJobToken(ctx context.Context, client *http.Client, endpoint, refreshToken string) (*JobTokenResponse, error) {
+	if strings.TrimSpace(refreshToken) == "" {
+		return nil, fmt.Errorf("qoder job token refresh: missing refresh token; sign in again")
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 20 * time.Second}
+	}
+	if endpoint == "" {
+		endpoint = OpenAPIHost + JobTokenRefreshPath
+	}
+	body, err := json.Marshal(map[string]string{"refresh_token": refreshToken})
+	if err != nil {
+		return nil, fmt.Errorf("qoder job token refresh: marshal: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, fmt.Errorf("qoder job token refresh: create request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("qoder job token refresh: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("qoder job token refresh: status %d", resp.StatusCode)
+	}
+	var token JobTokenResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&token); err != nil {
+		return nil, fmt.Errorf("qoder job token refresh: decode: %w", err)
+	}
+	if strings.TrimSpace(token.Token) == "" {
+		return nil, fmt.Errorf("qoder job token refresh: empty token in response")
+	}
+	if strings.TrimSpace(token.RefreshToken) == "" {
+		return nil, fmt.Errorf("qoder job token refresh: empty refresh token in response")
+	}
+	return &token, nil
 }
 
 // OAuthDeviceFlow implements Qoder's device flow (dt- -> jt-), verified live.
@@ -40,6 +83,15 @@ func NewOAuthDeviceFlow(cfgHTTPClient *http.Client) *OAuthDeviceFlow {
 		client = &http.Client{Timeout: 20 * time.Second}
 	}
 	return &OAuthDeviceFlow{httpClient: client, clientID: ClientID}
+}
+
+// HTTPClient returns the underlying HTTP client used by the device flow. It is
+// non-nil after NewOAuthDeviceFlow, so callers can reuse it for model fetches.
+func (f *OAuthDeviceFlow) HTTPClient() *http.Client {
+	if f == nil || f.httpClient == nil {
+		return &http.Client{Timeout: 20 * time.Second}
+	}
+	return f.httpClient
 }
 
 func randomBytes(n int) ([]byte, error) {

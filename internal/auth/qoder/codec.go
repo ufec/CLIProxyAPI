@@ -2,26 +2,17 @@ package qoder
 
 import "strings"
 
-// BodyCodec implements the Qoder agent_chat_generation body codec (SOLVED and
-// verified byte-exact against real captures; live E2E confirmed).
+// BodyCodec implements the Qoder request body codec. The worker encodes the
+// plaintext with this alphabet, then exchanges the first and last thirds of
+// the encoded string.
 //
-// Verified facts (see oauth-service/qorder/QODER_CODEC_FINAL.md and the live
-// E2E probes in oauth-service/qorder/qoder_*):
-//   - The body is NOT encrypted; it is custom-alphabet base64 of the plaintext.
+// Verified facts:
+//   - The captured alphabet and group/padding behavior are preserved here.
 //   - Alphabet (dumped from live Qoder.exe memory):
 //       _doRTgHZBKcGVjlvpC,@aFSx#DPuNJme&i*MzLOEn)sUrthbf%Y^w.(kIQyXqWA!
 //   - Grouping is standard base64: every 4 chars = 24 bits = 3 plaintext bytes.
-//   - '$' is an in-group pad character (RFC 4648 style): it is SKIPPED during
-//     decode and does NOT contribute 6 bits. The 6-bit value 63 is encoded as
-//     '!' (the alphabet's 64th char). Real captured bodies contain BOTH '$'
-//     (as pad within groups) and '!' (as the value-63 data char). The single
-//     '$' in qqtest appears in group 'exw$' — skipping it yields the correct
-//     3 bytes; mapping it to 63 would produce an extra spurious byte (0x3F).
-//   - Some bodies carry a 2-char magic prefix (e.g. "Qh" on records 68/88)
-//     which must be dropped before group decode.
-//   - Upstream server CustomBase64Util decode0 accepts these bodies (verified
-//     live: replaying the real qqtest ciphertext through our COSY envelope
-//     returned real SSE chat chunks).
+//   - '!' (alphabet 64th char) encodes 6-bit value 63.
+//   - A single plaintext request is encoded as one continuous base64 stream.
 
 const (
 	// BodyAlphabet is the custom base64 alphabet.
@@ -77,8 +68,8 @@ func groupBytes(grp string) []byte {
 }
 
 // BodyDecode decodes a body: each 4-char group yields floor(6*k/8) bytes,
-// where k is the number of non-pad chars in the group. '$' is always skipped
-// (RFC 4648 pad semantics); '!' encodes 6-bit value 63.
+// where k is the number of non-pad chars in the group. '$' is skipped, '!'
+// encodes 6-bit value 63.
 func BodyDecode(s string) []byte {
 	var out []byte
 	for gi := 0; gi+4 <= len(s); gi += 4 {
@@ -90,34 +81,31 @@ func BodyDecode(s string) []byte {
 	return out
 }
 
-// BodyEncode encodes bytes into custom base64. 6-bit value 63 is emitted as
-// '!' (the alphabet's 64th character). The final partial 6-bit group is
-// zero-padded into one char; the char count is then padded to a multiple of 4
-// with '$' pad chars.
-func BodyEncode(data []byte) string {
+// segmentEncode encodes one segment with standard base64 bitstream: bytes to
+// 6-bit groups (MSB first), mapped through the custom alphabet; final partial
+// group zero-padded into one char; char count padded to multiple of 4 with '$'.
+// 6-bit value 63 is emitted as '!'.
+func segmentEncode(data []byte) string {
 	var sb strings.Builder
 	acc := 0
 	nb := 0
-	for _, b := range data {
-		acc = (acc << 8) | int(b)
-		nb += 8
-		for nb >= 6 {
-			nb -= 6
-			v := (acc >> nb) & 0x3F
-			if v == BodyPadValue {
-				sb.WriteByte('!')
-			} else {
-				sb.WriteByte(BodyAlphabet[v])
-			}
-		}
-	}
-	if nb > 0 {
-		v := (acc << (6 - nb)) & 0x3F
+	emit := func(v int) {
 		if v == BodyPadValue {
 			sb.WriteByte('!')
 		} else {
 			sb.WriteByte(BodyAlphabet[v])
 		}
+	}
+	for _, b := range data {
+		acc = (acc << 8) | int(b)
+		nb += 8
+		for nb >= 6 {
+			nb -= 6
+			emit((acc >> nb) & 0x3F)
+		}
+	}
+	if nb > 0 {
+		emit((acc << (6 - nb)) & 0x3F)
 	}
 	for sb.Len()%4 != 0 {
 		sb.WriteByte('$')
@@ -125,9 +113,33 @@ func BodyEncode(data []byte) string {
 	return sb.String()
 }
 
+// BodyEncode encodes one plaintext request into custom base64.
+func BodyEncode(data []byte) string {
+	return segmentEncode(data)
+}
+
 // EncodeBody is the public encode entry point.
 func EncodeBody(plaintext []byte) string {
 	return BodyEncode(plaintext)
+}
+
+// EncodeRequestBody produces the wire body used by prepareInferRequest in the
+// Qoder worker. The middle segment remains in place when the outer thirds swap.
+func EncodeRequestBody(plaintext []byte) string {
+	return swapBodyOuterThirds(BodyEncode(plaintext))
+}
+
+// DecodeRequestBody reverses the wire-body permutation before base64 decoding.
+func DecodeRequestBody(wire string) []byte {
+	return BodyDecode(swapBodyOuterThirds(wire))
+}
+
+func swapBodyOuterThirds(encoded string) string {
+	third := len(encoded) / 3
+	if third == 0 {
+		return encoded
+	}
+	return encoded[len(encoded)-third:] + encoded[third:len(encoded)-third] + encoded[:third]
 }
 
 // EncodeBodySegments encodes multiple plaintext segments joined by '$'.

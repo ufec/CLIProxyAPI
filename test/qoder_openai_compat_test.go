@@ -40,7 +40,7 @@ func qoderUpstreamServer(t *testing.T) *httptest.Server {
 			Business   map[string]any `json:"business"`
 			Messages   []any          `json:"messages"`
 		}
-		decoded := qoderauth.BodyDecode(string(raw))
+		decoded := qoderauth.DecodeRequestBody(string(raw))
 		if errDecode := json.Unmarshal(decoded, &plain); errDecode != nil {
 			t.Errorf("decoded body is not valid JSON: %v (decoded %d bytes)", errDecode, len(decoded))
 			return
@@ -116,6 +116,9 @@ func TestQoderOpenAICompatChatCompletion(t *testing.T) {
 		if chunk.Err != nil {
 			t.Fatal(chunk.Err)
 		}
+		if !json.Valid(chunk.Payload) {
+			t.Fatalf("executor chunk must be raw JSON before HTTP SSE framing: %q", chunk.Payload)
+		}
 		sb.Write(chunk.Payload)
 	}
 	streamed := sb.String()
@@ -130,9 +133,6 @@ func TestQoderOpenAICompatChatCompletion(t *testing.T) {
 	}
 	if !strings.Contains(streamed, `"usage"`) {
 		t.Fatalf("usage missing: %q", streamed)
-	}
-	if !strings.Contains(streamed, `data: `) {
-		t.Fatalf("SSE data framing missing: %q", streamed)
 	}
 }
 

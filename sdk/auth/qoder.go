@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -26,8 +27,7 @@ func (QoderAuthenticator) Provider() string {
 	return "qoder"
 }
 
-// RefreshLead returns nil (jt- task tokens are exchanged per login; upstream
-// 401s trigger a fresh device login through the auth manager).
+// RefreshLead returns nil; refresh is triggered by authorization failures or manually.
 func (QoderAuthenticator) RefreshLead() *time.Duration {
 	return nil
 }
@@ -71,6 +71,19 @@ func (a QoderAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 
 	uid := strings.TrimSpace(dt.UserID)
 	fileName := fmt.Sprintf("qoder-%d.json", time.Now().UnixMilli())
+
+	// Available models are optional; re-synced on login. Fetched live from the
+	// provider so the gateway does not depend on the embedded models.json
+	// catalog (which the remote updater overwrites without a qoder section).
+	var models []qoder.ModelInfo
+	if modelsData, modelsErr := qoder.FetchModels(ctx, flow.HTTPClient(), qoder.APIHost, uid, jt.Token); modelsErr != nil {
+		log.Warnf("qoder: failed to fetch models: %v", modelsErr)
+	} else if parsed, parseErr := qoder.ParseModels(modelsData); parseErr != nil {
+		log.Warnf("qoder: failed to parse models: %v", parseErr)
+	} else {
+		models = parsed
+	}
+
 	metadata := map[string]any{
 		"type":                  "qoder",
 		"access_token":          jt.Token,
@@ -79,6 +92,19 @@ func (a QoderAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 		"x-gw-user-id":          uid,
 		"timestamp":             time.Now().UnixMilli(),
 		"redirect_uri_protocol": "device",
+	}
+	if jt.RefreshToken != "" {
+		metadata["refresh_token"] = jt.RefreshToken
+	}
+	if len(models) > 0 {
+		ids := make([]string, 0, len(models))
+		for _, m := range models {
+			ids = append(ids, m.ID())
+		}
+		metadata["enabled_models"] = ids
+		if raw, marshalErr := json.Marshal(models); marshalErr == nil {
+			metadata["models_meta"] = string(raw)
+		}
 	}
 
 	fmt.Println("\nQoder authentication successful!")

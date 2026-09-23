@@ -771,6 +771,14 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 
 		uid := strings.TrimSpace(dt.UserID)
 		fileName := fmt.Sprintf("qoder-%d.json", time.Now().UnixMilli())
+		var models []qoderauth.ModelInfo
+		if modelsData, modelsErr := qoderauth.FetchModels(pollCtx, flow.HTTPClient(), qoderauth.APIHost, uid, jt.Token); modelsErr != nil {
+			log.Warnf("qoder: failed to fetch models: %v", modelsErr)
+		} else if parsed, parseErr := qoderauth.ParseModels(modelsData); parseErr != nil {
+			log.Warnf("qoder: failed to parse models: %v", parseErr)
+		} else {
+			models = parsed
+		}
 		metadata := map[string]any{
 			"type":                 "qoder",
 			"access_token":         jt.Token,
@@ -778,6 +786,19 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 			"uid":                  uid,
 			"x-gw-user-id":         uid,
 			"timestamp":            time.Now().UnixMilli(),
+		}
+		if jt.RefreshToken != "" {
+			metadata["refresh_token"] = jt.RefreshToken
+		}
+		if len(models) > 0 {
+			ids := make([]string, 0, len(models))
+			for i := range models {
+				ids = append(ids, models[i].ID())
+			}
+			metadata["enabled_models"] = ids
+			if raw, errMarshal := json.Marshal(models); errMarshal == nil {
+				metadata["models_meta"] = string(raw)
+			}
 		}
 		record := &coreauth.Auth{
 			ID:       fileName,

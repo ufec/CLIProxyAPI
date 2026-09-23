@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,8 +26,7 @@ import (
 // (api3.qoder.sh agent_chat_generation SSE API).
 //
 // Protocol summary (verified end-to-end, see oauth-service/qorder/):
-//   - request body = custom-alphabet base64 of a plaintext JSON
-//     (group-wise codec, '$' in-group padding; see internal/auth/qoder)
+//   - request body = custom-base64 followed by an outer-third swap
 //   - envelope headers = COSY (Authorization Bearer COSY..., Cosy-Key, ...)
 //   - upstream returns SSE lines: data:{"headers":...,"body":"<openai chunk>",
 //     "statusCodeValue":200} and a final data:{"firstTokenDuration":...}.
@@ -38,6 +38,9 @@ type QoderExecutor struct {
 	// UpstreamURLOverride, when non-empty, replaces the default Qoder endpoint
 	// (used by tests that stub the upstream with a local server).
 	UpstreamURLOverride string
+	// RefreshURLOverride and RefreshHTTPClient support isolated refresh tests.
+	RefreshURLOverride string
+	RefreshHTTPClient  *http.Client
 }
 
 // NewQoderExecutor creates a new Qoder executor.
@@ -98,9 +101,10 @@ func qoderUserFromAuth(auth *cliproxyauth.Auth) (*qoderauth.User, bool) {
 }
 
 // PrepareRequest injects Qoder COSY credentials into an outgoing request.
-// It re-encodes plaintextBody via EncodeBody and sets that as the wire body so
+// It encodes plaintextBody with the Qoder wire codec and sets that as
+// the wire body so
 // the signed body and the transmitted body are guaranteed identical. The
-// timestamp ts (unix millis) is used for signature material; pass the same ts
+// timestamp ts (unix seconds) is used for signature material; pass the same ts
 // the caller used to compute the signing window.
 func (e *QoderExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth, ts int64, plaintextBody []byte) error {
 	if req == nil {
@@ -112,10 +116,10 @@ func (e *QoderExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Aut
 	}
 	encoded := ""
 	if plaintextBody != nil {
-		encoded = qoderauth.EncodeBody(plaintextBody)
+		encoded = qoderauth.EncodeRequestBody(plaintextBody)
 	}
 	if ts == 0 {
-		ts = time.Now().UnixMilli()
+		ts = time.Now().Unix()
 	}
 	headers, err := qoderauth.BuildCosyHeaders(req.URL.String(), user, encoded, ts)
 	if err != nil {
@@ -245,14 +249,160 @@ func (e *QoderExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	var buf bytes.Buffer
-	for chunk := range stream.Chunks {
-		if chunk.Err != nil {
-			return cliproxyexecutor.Response{}, chunk.Err
-		}
-		buf.Write(chunk.Payload)
+	payload, err := aggregateQoderCompletion(stream.Chunks, req.Model)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
 	}
-	return cliproxyexecutor.Response{Payload: buf.Bytes(), Headers: stream.Headers}, nil
+	headers := stream.Headers.Clone()
+	headers.Set("Content-Type", "application/json")
+	return cliproxyexecutor.Response{Payload: payload, Headers: headers}, nil
+}
+
+type qoderCompletionChunk struct {
+	ID      string          `json:"id"`
+	Created int64           `json:"created"`
+	Model   string          `json:"model"`
+	Usage   json.RawMessage `json:"usage"`
+	Choices []struct {
+		Index        int     `json:"index"`
+		FinishReason *string `json:"finish_reason"`
+		Delta        struct {
+			Role             string `json:"role"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+			ToolCalls        []struct {
+				Index    int    `json:"index"`
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+		} `json:"delta"`
+	} `json:"choices"`
+}
+
+type qoderAggregatedToolCall struct {
+	ID        string
+	Type      string
+	Name      string
+	Arguments strings.Builder
+}
+
+type qoderAggregatedChoice struct {
+	Role         string
+	Content      strings.Builder
+	Reasoning    strings.Builder
+	FinishReason *string
+	ToolCalls    map[int]*qoderAggregatedToolCall
+}
+
+func aggregateQoderCompletion(chunks <-chan cliproxyexecutor.StreamChunk, requestedModel string) ([]byte, error) {
+	choices := make(map[int]*qoderAggregatedChoice)
+	var id, model string
+	var created int64
+	var usage json.RawMessage
+	for chunk := range chunks {
+		if chunk.Err != nil {
+			return nil, chunk.Err
+		}
+		data := bytes.TrimSpace(chunk.Payload)
+		var part qoderCompletionChunk
+		if err := json.Unmarshal(data, &part); err != nil {
+			return nil, fmt.Errorf("qoder executor: decode stream chunk: %w", err)
+		}
+		if id == "" {
+			id = part.ID
+			created = part.Created
+			model = part.Model
+		}
+		if len(part.Usage) > 0 && string(part.Usage) != "null" {
+			usage = part.Usage
+		}
+		for _, choice := range part.Choices {
+			current := choices[choice.Index]
+			if current == nil {
+				current = &qoderAggregatedChoice{Role: "assistant", ToolCalls: make(map[int]*qoderAggregatedToolCall)}
+				choices[choice.Index] = current
+			}
+			if choice.Delta.Role != "" {
+				current.Role = choice.Delta.Role
+			}
+			current.Content.WriteString(choice.Delta.Content)
+			current.Reasoning.WriteString(choice.Delta.ReasoningContent)
+			if choice.FinishReason != nil {
+				current.FinishReason = choice.FinishReason
+			}
+			for _, tool := range choice.Delta.ToolCalls {
+				target := current.ToolCalls[tool.Index]
+				if target == nil {
+					target = &qoderAggregatedToolCall{}
+					current.ToolCalls[tool.Index] = target
+				}
+				if tool.ID != "" {
+					target.ID = tool.ID
+				}
+				if tool.Type != "" {
+					target.Type = tool.Type
+				}
+				if tool.Function.Name != "" {
+					target.Name = tool.Function.Name
+				}
+				target.Arguments.WriteString(tool.Function.Arguments)
+			}
+		}
+	}
+	if len(choices) == 0 {
+		return nil, fmt.Errorf("qoder executor: upstream returned no completion choices")
+	}
+	indexes := make([]int, 0, len(choices))
+	for index := range choices {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	resultChoices := make([]map[string]any, 0, len(indexes))
+	for _, index := range indexes {
+		choice := choices[index]
+		message := map[string]any{"role": choice.Role, "content": choice.Content.String()}
+		if choice.Reasoning.Len() > 0 {
+			message["reasoning_content"] = choice.Reasoning.String()
+		}
+		if len(choice.ToolCalls) > 0 {
+			toolIndexes := make([]int, 0, len(choice.ToolCalls))
+			for toolIndex := range choice.ToolCalls {
+				toolIndexes = append(toolIndexes, toolIndex)
+			}
+			sort.Ints(toolIndexes)
+			tools := make([]map[string]any, 0, len(toolIndexes))
+			for _, toolIndex := range toolIndexes {
+				tool := choice.ToolCalls[toolIndex]
+				tools = append(tools, map[string]any{
+					"id": tool.ID, "type": tool.Type,
+					"function": map[string]any{"name": tool.Name, "arguments": tool.Arguments.String()},
+				})
+			}
+			message["tool_calls"] = tools
+		}
+		resultChoices = append(resultChoices, map[string]any{
+			"index": index, "message": message, "finish_reason": choice.FinishReason,
+		})
+	}
+	if strings.TrimSpace(requestedModel) != "" {
+		model = requestedModel
+	}
+	result := map[string]any{
+		"id": id, "object": "chat.completion", "created": created,
+		"model": model, "choices": resultChoices,
+	}
+	if len(usage) > 0 {
+		result["usage"] = usage
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("qoder executor: encode completion: %w", err)
+	}
+	return encoded, nil
 }
 
 // ExecuteStream performs the SSE chat call and unwraps OpenAI chunks.
@@ -263,7 +413,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	// Single shared timestamp: signing material and wire body are produced from
 	// the same plaintext+ts inside PrepareRequest.
-	ts := time.Now().UnixMilli()
+	ts := time.Now().Unix()
 
 	endpoint := e.upstreamURL
 	if e.UpstreamURLOverride != "" {
@@ -294,7 +444,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 }
 
 // streamSSE reads the SSE stream, unwraps the outer envelope, and forwards the
-// inner OpenAI chunk JSON as "data: <json>\n\n".
+// inner OpenAI chunk JSON. The API handler adds the SSE data framing.
 func (e *QoderExecutor) streamSSE(ctx context.Context, resp *http.Response, chunks chan<- cliproxyexecutor.StreamChunk) {
 	defer func() {
 		_ = resp.Body.Close()
@@ -329,11 +479,11 @@ func (e *QoderExecutor) streamSSE(ctx context.Context, resp *http.Response, chun
 			continue
 		}
 		inner := gjson.Get(payload, "body").String()
-		if inner == "" {
+		if inner == "" || !json.Valid([]byte(inner)) {
 			continue
 		}
 		select {
-		case chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: " + inner + "\n\n")}:
+		case chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(inner)}:
 			forwarded++
 		case <-ctx.Done():
 			return
@@ -386,10 +536,28 @@ func truncateForLog(s string, max int) string {
 	return s[:max] + "…"
 }
 
-// Refresh returns the auth unchanged (jt- tokens are short-lived; upstream
-// 401s will drive a re-login through the auth manager).
+// Refresh rotates the Qoder job token pair using the persisted refresh token.
 func (e *QoderExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
-	return auth, nil
+	if auth == nil {
+		return nil, fmt.Errorf("qoder refresh: missing credential")
+	}
+	refreshToken, _ := auth.Metadata["refresh_token"].(string)
+	updated, err := qoderauth.RefreshJobToken(ctx, e.RefreshHTTPClient, e.RefreshURLOverride, refreshToken)
+	if err != nil {
+		return nil, fmt.Errorf("qoder refresh: %w", err)
+	}
+	result := auth.Clone()
+	if result.Metadata == nil {
+		result.Metadata = make(map[string]any)
+	}
+	result.Metadata["access_token"] = updated.Token
+	result.Metadata["security_oauth_token"] = updated.Token
+	result.Metadata["refresh_token"] = updated.RefreshToken
+	if result.Attributes == nil {
+		result.Attributes = make(map[string]string)
+	}
+	result.Attributes["security_oauth_token"] = updated.Token
+	return result, nil
 }
 
 // CountTokens reports a best-effort estimate from the plaintext body.
@@ -421,7 +589,7 @@ func (e *QoderExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 	if errClose := httpReq.Body.Close(); errClose != nil {
 		log.Errorf("qoder executor: close body: %v", errClose)
 	}
-	ts := time.Now().UnixMilli()
+	ts := time.Now().Unix()
 	if errPrep := e.PrepareRequest(httpReq, auth, ts, plaintext); errPrep != nil {
 		return nil, errPrep
 	}

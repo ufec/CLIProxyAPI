@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -23,6 +24,8 @@ import (
 )
 
 var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"}
+
+var fetchQoderModels = qoderauth.FetchModels
 
 var (
 	callbackForwardersMu  sync.Mutex
@@ -177,6 +180,7 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 	var (
 		authID   string
 		authMeta map[string]any
+		authFile *coreauth.Auth
 	)
 	if h.authManager != nil {
 		auths := h.authManager.List()
@@ -184,6 +188,7 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 			if auth.FileName == name || auth.ID == name {
 				authID = auth.ID
 				authMeta = auth.Metadata
+				authFile = auth
 				break
 			}
 		}
@@ -196,6 +201,16 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 	// Get models from registry
 	reg := registry.GetGlobalRegistry()
 	models := reg.GetModelsForClient(authID)
+	if authFile != nil && strings.EqualFold(authFile.Provider, qoderauth.ProviderKey) && !hasQoderModelMetadata(authMeta) {
+		updated, err := h.fetchQoderAuthModels(c, authFile)
+		if err != nil {
+			log.WithError(err).Warn("failed to load Qoder auth file models")
+			c.JSON(502, gin.H{"error": "failed to load Qoder models"})
+			return
+		}
+		authMeta = updated.Metadata
+		models = reg.GetModelsForClient(authID)
+	}
 
 	result := make([]gin.H, 0, len(models))
 	seen := make(map[string]struct{}, len(models))
@@ -228,6 +243,48 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 	c.JSON(200, gin.H{"models": result})
 }
 
+func hasQoderModelMetadata(metadata map[string]any) bool {
+	if metadata == nil {
+		return false
+	}
+	raw, _ := metadata["models_meta"].(string)
+	return strings.TrimSpace(raw) != ""
+}
+
+func (h *Handler) fetchQoderAuthModels(c *gin.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	uid, _ := auth.Metadata["uid"].(string)
+	token, _ := auth.Metadata["security_oauth_token"].(string)
+	if token == "" {
+		token, _ = auth.Metadata["access_token"].(string)
+	}
+	data, err := fetchQoderModels(c.Request.Context(), nil, qoderauth.APIHost, uid, token)
+	if err != nil {
+		return nil, fmt.Errorf("fetch Qoder models: %w", err)
+	}
+	models, err := qoderauth.ParseModels(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse Qoder models: %w", err)
+	}
+	updated := auth.Clone()
+	if updated.Metadata == nil {
+		updated.Metadata = make(map[string]any)
+	}
+	ids := make([]string, 0, len(models))
+	for i := range models {
+		ids = append(ids, models[i].ID())
+	}
+	raw, err := json.Marshal(models)
+	if err != nil {
+		return nil, fmt.Errorf("marshal Qoder models: %w", err)
+	}
+	updated.Metadata["enabled_models"] = ids
+	updated.Metadata["models_meta"] = string(raw)
+	if _, err = h.saveTokenRecord(c.Request.Context(), updated); err != nil {
+		return nil, fmt.Errorf("save Qoder models: %w", err)
+	}
+	return updated, nil
+}
+
 // appendMissingCatalogModels adds entries from the credential's synced model
 // catalog (metadata key "models_meta") that are absent from the registry list.
 // The catalog is a JSON array of objects carrying at least "id"; "name" and
@@ -245,7 +302,15 @@ func appendMissingCatalogModels(result []gin.H, metadata map[string]any, seen ma
 		return result
 	}
 	for _, item := range catalog {
+		if metadata["type"] == qoderauth.ProviderKey && item["enable"] != true {
+			continue
+		}
 		id, _ := item["id"].(string)
+		if id == "" && metadata["type"] == qoderauth.ProviderKey {
+			if key, _ := item["key"].(string); qoderauth.IsRoutableModel(key) {
+				id = "qoder/" + strings.TrimSpace(key)
+			}
+		}
 		id = strings.TrimSpace(id)
 		if id == "" {
 			continue
@@ -255,6 +320,8 @@ func appendMissingCatalogModels(result []gin.H, metadata map[string]any, seen ma
 		}
 		entry := gin.H{"id": id}
 		if name, _ := item["name"].(string); strings.TrimSpace(name) != "" {
+			entry["display_name"] = strings.TrimSpace(name)
+		} else if name, _ := item["display_name"].(string); strings.TrimSpace(name) != "" {
 			entry["display_name"] = strings.TrimSpace(name)
 		}
 		if credits, _ := item["credits"].(string); strings.TrimSpace(credits) != "" {

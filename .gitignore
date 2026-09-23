@@ -79,3 +79,5 @@ management.html.backup-*
 
 # Local LLM Wiki vault
 .llm-wiki
+/work/
+/qoder-test.exe~

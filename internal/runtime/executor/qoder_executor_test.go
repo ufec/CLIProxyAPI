@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -24,6 +25,31 @@ func testQoderAuth() *cliproxyauth.Auth {
 			"email":                "t@example.com",
 			"security_oauth_token": "jt-secret-token",
 		},
+	}
+}
+
+func TestQoderRefreshRotatesCredential(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != qoderauth.JobTokenRefreshPath {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"token":"new-job","refresh_token":"new-refresh"}`))
+	}))
+	defer server.Close()
+	auth := testQoderAuth()
+	auth.Metadata = map[string]any{"refresh_token": "old-refresh", "access_token": "jt-secret-token"}
+	exec := NewQoderExecutor(nil)
+	exec.RefreshURLOverride = server.URL + qoderauth.JobTokenRefreshPath
+	exec.RefreshHTTPClient = server.Client()
+	updated, err := exec.Refresh(context.Background(), auth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Metadata["access_token"] != "new-job" || updated.Metadata["refresh_token"] != "new-refresh" || updated.Attributes["security_oauth_token"] != "new-job" {
+		t.Fatal("refreshed credential did not contain rotated tokens")
+	}
+	if auth.Metadata["access_token"] != "jt-secret-token" || auth.Attributes["security_oauth_token"] != "jt-secret-token" {
+		t.Fatal("original credential was mutated")
 	}
 }
 
@@ -101,7 +127,7 @@ func TestQoderExecuteStreamUnwraps(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// verify the request body is valid custom-base64 and decodes
 		raw, _ := io.ReadAll(r.Body)
-		plain := qoderauth.BodyDecode(string(raw))
+		plain := qoderauth.DecodeRequestBody(string(raw))
 		if !strings.Contains(string(plain), `"role":"user"`) {
 			t.Errorf("upstream body missing user message")
 		}
@@ -115,6 +141,7 @@ func TestQoderExecuteStreamUnwraps(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`data:{"headers":{},"body":"{\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}","statusCodeValue":200,"statusCode":"OK"}` + "\n"))
 		_, _ = w.Write([]byte(`data:{"headers":{},"body":"{\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}","statusCodeValue":200,"statusCode":"OK"}` + "\n"))
+		_, _ = w.Write([]byte(`data:{"body":"DONE"}` + "\n"))
 		_, _ = w.Write([]byte(`data:{"firstTokenDuration":1,"totalDuration":2}` + "\n"))
 	}))
 	defer upstream.Close()
@@ -135,11 +162,66 @@ func TestQoderExecuteStreamUnwraps(t *testing.T) {
 		if chunk.Err != nil {
 			t.Fatal(chunk.Err)
 		}
+		if !json.Valid(chunk.Payload) {
+			t.Fatalf("stream chunk must be raw JSON for API SSE framing: %q", chunk.Payload)
+		}
 		got = append(got, string(chunk.Payload))
 	}
 	joined := strings.Join(got, "")
 	if !strings.Contains(joined, `"content":"Hel"`) || !strings.Contains(joined, `"content":"lo"`) {
 		t.Fatalf("streamed chunks missing content: %q", joined)
+	}
+}
+
+func TestQoderExecuteNonStreamAggregatesCompletion(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data:{"body":"{\"id\":\"chatcmpl-test\",\"created\":123,\"model\":\"auto\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"Think \"}}]}"}` + "\n"))
+		_, _ = w.Write([]byte(`data:{"body":"{\"id\":\"chatcmpl-test\",\"created\":123,\"model\":\"auto\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\",\"reasoning_content\":\"first\"}}]}"}` + "\n"))
+		_, _ = w.Write([]byte(`data:{"body":"{\"id\":\"chatcmpl-test\",\"created\":123,\"model\":\"auto\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"},\"finish_reason\":\"stop\"}]}"}` + "\n"))
+		_, _ = w.Write([]byte(`data:{"body":"{\"id\":\"chatcmpl-test\",\"created\":123,\"model\":\"auto\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}"}` + "\n"))
+		_, _ = w.Write([]byte(`data:{"body":"DONE"}` + "\n"))
+	}))
+	defer upstream.Close()
+
+	e := NewQoderExecutor(&config.Config{})
+	e.UpstreamURLOverride = upstream.URL
+	request := cliproxyexecutor.Request{
+		Model:   "qoder/qfmodel",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`),
+	}
+	response, err := e.Execute(context.Background(), testQoderAuth(), request, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := response.Headers.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("content type = %q", got)
+	}
+	var result struct {
+		Object  string `json:"object"`
+		Model   string `json:"model"`
+		Choices []struct {
+			Message struct {
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage struct {
+			TotalTokens int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(response.Payload, &result); err != nil {
+		t.Fatalf("response is not JSON: %v: %q", err, response.Payload)
+	}
+	if result.Object != "chat.completion" || result.Model != "qoder/qfmodel" || len(result.Choices) != 1 {
+		t.Fatalf("unexpected completion: %+v", result)
+	}
+	if result.Choices[0].Message.Content != "Hello world" || result.Choices[0].Message.ReasoningContent != "Think first" || result.Choices[0].FinishReason != "stop" {
+		t.Fatalf("unexpected choice: %+v", result.Choices[0])
+	}
+	if result.Usage.TotalTokens != 5 {
+		t.Fatalf("usage = %+v", result.Usage)
 	}
 }
 
@@ -178,5 +260,20 @@ func TestQoderUserFromAuthMetadata(t *testing.T) {
 	}
 	if user.Token != "jt-from-metadata" || user.UID != "u1" {
 		t.Fatalf("wrong user: %+v", user)
+	}
+}
+
+func TestQoderChatBodyRoundTripThroughWireCodec(t *testing.T) {
+	req := cliproxyexecutor.Request{
+		Model:   "qoder/qwen3.8-flash",
+		Payload: []byte(`{"model":"qoder/qwen3.8-flash","messages":[{"role":"user","content":"say hi"}],"max_tokens":32}`),
+	}
+	plain, err := qoderChatBody(req, cliproxyexecutor.Options{OriginalRequest: req.Payload})
+	if err != nil {
+		t.Fatalf("build body: %v", err)
+	}
+	decoded := qoderauth.DecodeRequestBody(qoderauth.EncodeRequestBody(plain))
+	if !bytes.Equal(decoded, plain) {
+		t.Fatalf("wire codec changed generated body: got %d bytes, want %d", len(decoded), len(plain))
 	}
 }

@@ -36,6 +36,30 @@ func TestBodyCodecRoundtrip(t *testing.T) {
 	}
 }
 
+func TestRequestBodyCodecMatchesWorker(t *testing.T) {
+	plain := []byte(`{"messages":[]}`)
+	const workerBody = "ByS..Wj^#SJLNYmYKtDx"
+	if got := EncodeRequestBody(plain); got != workerBody {
+		t.Fatalf("wire body = %q, want %q", got, workerBody)
+	}
+	if got := DecodeRequestBody(workerBody); !bytes.Equal(got, plain) {
+		t.Fatalf("decoded wire body = %q, want %q", got, plain)
+	}
+}
+
+func TestRequestBodyCodecRoundtripLengths(t *testing.T) {
+	for n := 0; n <= 512; n++ {
+		plain := make([]byte, n)
+		for i := range plain {
+			plain[i] = byte(i % 251)
+		}
+		wire := EncodeRequestBody(plain)
+		if got := DecodeRequestBody(wire); !bytes.Equal(got, plain) {
+			t.Fatalf("roundtrip failed at %d bytes", n)
+		}
+	}
+}
+
 func TestBodyCodecQQTESTSegmentRoundtrip(t *testing.T) {
 	// The real captured qqtest body (custom alphabet) split at its single '$'
 	// must re-encode exactly (locked codec evidence). Each segment is decoded
