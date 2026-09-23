@@ -38,6 +38,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
+	if upstreamModel != baseModel {
+		reporter.SetUpstreamModel(upstreamModel)
+	}
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("claude")
@@ -68,12 +71,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	continuityCtx := &helps.ClaudeContinuityContext{}
 	ctx = helps.WithClaudeContinuityContext(ctx, continuityCtx)
 	ctx = helps.WithIncomingHeaders(ctx, incomingHeaders)
+	ctx = helps.WithClaudeExecutionMetadata(ctx, helps.ClaudeRequestHasExecutionMetadata(opts.Metadata, req.Metadata))
 	if claudeSessionID != "" {
 		ctx = helps.WithClaudeSessionID(ctx, claudeSessionID)
 	}
 
-	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, upstreamStream, helps.APIKeyModelIsCompat(req))
-	body := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, upstreamStream, helps.APIKeyModelIsCompat(req))
+	isCompat := helps.APIKeyModelIsCompat(req)
+	originalTranslated, body := helps.TranslateRequestPairWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, upstreamStream, isCompat)
 	body = helps.SetStringIfDifferent(body, "model", upstreamModel)
 
 	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
@@ -173,25 +177,15 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		// Declassified as probe (e.g. payload override changed max_tokens: 1 to normal request):
 		// Initialize continuity and diagnostics if cloaked and eligible.
 		if cloaked {
-			sessionID := helps.ClaudeSessionIDFromContext(ctx)
-			if sessionID == "" && auth != nil {
-				sessionID = helps.ClaudeAgentSessionUUIDForRequest(incomingHeaders, body, body, confirmedClaudeCode)
-			}
-			if sessionID != "" && auth != nil {
-				credIdentity := claudeDiagnosticsCredentialIdentity(auth)
-				isNewTurn := helps.IsClaudeNewPromptTurn(body)
-				continuityKey, seq, prevMsgID, storedPrevReq, storedPromptID := helps.BeginClaudeContinuity(credIdentity, sessionID, isNewTurn, "")
+			existingPrevReq, existingPromptID := helps.ExtractClaudeBillingTags(body)
+			prevReq, promptID, cCtx, ok := resolveClaudeContinuityTags(ctx, auth, incomingHeaders, body, confirmedClaudeCode, existingPrevReq, existingPromptID)
+			if ok {
 				if continuityCtx != nil {
-					continuityCtx.Key = continuityKey
-					continuityCtx.Sequence = seq
-					continuityCtx.PreviousMessageID = prevMsgID
-					continuityCtx.PreviousRequestID = storedPrevReq
-					continuityCtx.PromptID = storedPromptID
-					continuityCtx.Initialized = true
+					*continuityCtx = cCtx
 				}
-				body = helps.InjectClaudeBillingTags(body, storedPrevReq, storedPromptID)
+				body = helps.InjectClaudeBillingTags(body, prevReq, promptID)
 				if fp.InjectDiagnostics && isAnthropicUpstreamBase(baseURL) {
-					body, diagnosticsState = injectClaudeDiagnosticsWithState(body, continuityKey, seq, prevMsgID, storedPromptID)
+					body, diagnosticsState = injectClaudeDiagnosticsWithState(body, cCtx.Key, cCtx.Sequence, cCtx.PreviousMessageID, promptID)
 				}
 			}
 		}
@@ -349,7 +343,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			helps.RecordAPIResponseError(ctx, e.cfg, decErr)
 			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
 			helps.LogWithRequestID(ctx).Warn(msg)
-			errClassified := classifyClaudeUpstreamError(httpResp.StatusCode, httpResp.Header, []byte(msg))
+			errClassified := classifyClaudeUpstreamErrorWithCooling(httpResp.StatusCode, httpResp.Header, []byte(msg), e.modelLevelCooling())
 			if fastRequest {
 				return resp, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errClassified)
 			}
@@ -370,7 +364,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		if fastRequest {
 			return resp, newClaudeFastDirectResponseError(httpResp, b)
 		}
-		return resp, classifyClaudeUpstreamError(httpResp.StatusCode, httpResp.Header, b)
+		return resp, classifyClaudeUpstreamErrorWithCooling(httpResp.StatusCode, httpResp.Header, b, e.modelLevelCooling())
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, claudeResponseContentEncoding(httpResp.Header))
 	if err != nil {
@@ -402,6 +396,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		lines := bytes.Split(data, []byte("\n"))
 		var streamUsage helps.StreamUsageBuffer
 		for i, line := range lines {
+			reporter.ObserveResponseModel(line)
 			streamUsage.ObserveClaudeStream(line)
 			restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
 			if errRestore != nil {
@@ -416,6 +411,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		data = bytes.Join(lines, []byte("\n"))
 	} else {
 		commitClaudeContinuity(diagnosticsState, claudeMessageIDFromResponse(data), helps.HeaderValueCaseInsensitive(httpResp.Header, "request-id"))
+		reporter.ObserveResponseModel(data)
 		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
 		var errRestore error
 		data, errRestore = restoreClaudeOAuthToolNamesFromResponse(data, oauthToolNamesReverseMap)

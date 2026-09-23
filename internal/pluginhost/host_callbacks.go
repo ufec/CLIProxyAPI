@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"strings"
 
+	"net/http"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -297,6 +301,9 @@ func (h *Host) callHostModelExecute(ctx context.Context, request []byte) ([]byte
 	if req.Stream {
 		return nil, fmt.Errorf("host.model.execute requires stream=false")
 	}
+	if errProxy := validateHostModelProxy(req.ProxyURL); errProxy != nil {
+		return nil, errProxy
+	}
 	executor := h.currentModelExecutor()
 	if executor == nil {
 		return nil, fmt.Errorf("host model executor is unavailable")
@@ -326,18 +333,61 @@ func modelExecutionRequestFromPlugin(req pluginapi.HostModelExecutionRequest, sk
 		Alt:                     req.Alt,
 		SkipInterceptorPluginID: skipPluginID,
 		SkipRouterPluginID:      skipPluginID,
+		ForcedProvider:          req.ForcedProvider,
+		AuthID:                  req.AuthID,
+		ProxyURL:                strings.TrimSpace(req.ProxyURL),
 	}
+}
+
+func validateHostModelProxy(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if !proxyutil.ValidRequestProxy(raw) {
+		return &modelExecutionStatusError{
+			err:        fmt.Errorf("invalid proxy_url"),
+			statusCode: http.StatusBadRequest,
+		}
+	}
+	return nil
+}
+
+type modelExecutionStatusError struct {
+	err        error
+	statusCode int
+}
+
+func (e *modelExecutionStatusError) Error() string {
+	if e.err != nil {
+		return e.err.Error()
+	}
+	if e.statusCode > 0 {
+		return fmt.Sprintf("model execution failed with status %d", e.statusCode)
+	}
+	return "model execution failed"
+}
+
+func (e *modelExecutionStatusError) StatusCode() int {
+	return e.statusCode
+}
+
+func (e *modelExecutionStatusError) Unwrap() error {
+	return e.err
 }
 
 func modelExecutionError(errMsg *interfaces.ErrorMessage) error {
 	if errMsg == nil {
 		return nil
 	}
+	if errMsg.StatusCode > 0 && clienterror.HTTPStatusFromError(errMsg.Error) != errMsg.StatusCode {
+		return &modelExecutionStatusError{
+			err:        errMsg.Error,
+			statusCode: errMsg.StatusCode,
+		}
+	}
 	if errMsg.Error != nil {
 		return errMsg.Error
-	}
-	if errMsg.StatusCode > 0 {
-		return fmt.Errorf("model execution failed with status %d", errMsg.StatusCode)
 	}
 	return fmt.Errorf("model execution failed")
 }

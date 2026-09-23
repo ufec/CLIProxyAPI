@@ -10,10 +10,14 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	kimiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/tidwall/gjson"
 )
 
@@ -984,6 +988,16 @@ func TestNormalizeKimiUpstreamModel(t *testing.T) {
 		{"kimi-k2.7-code[1m](high)", "kimi-for-coding(high)"},
 		{"k2.7-code", "kimi-for-coding"},
 		{"k2.7-code-highspeed", "kimi-for-coding-highspeed"},
+		{"kimi-k2.8", "kimi-for-coding"},
+		{"kimi-k2.8-code", "kimi-for-coding"},
+		{"Kimi-K2.8", "kimi-for-coding"},
+		{"Kimi-K2.8-Code", "kimi-for-coding"},
+		{"k2.8", "kimi-for-coding"},
+		{"k2.8-code", "kimi-for-coding"},
+		{"kimi-k2.8-preview", "kimi-for-coding"},
+		{"k2.8-preview", "kimi-for-coding"},
+		{"kimi-k2.8(max)", "kimi-for-coding(max)"},
+		{"kimi-k2.8-code[1m](high)", "kimi-for-coding(high)"},
 		{"kimi-for-coding", "kimi-for-coding"},
 		{"kimi-for-coding-highspeed", "kimi-for-coding-highspeed"},
 		{"Kimi-For-Coding", "kimi-for-coding"},
@@ -1223,5 +1237,315 @@ func TestNormalizeKimiToolsDirect(t *testing.T) {
 	fnParams := gjson.GetBytes(normalized, "functions.0.parameters")
 	if got := fnParams.Get("type").String(); got != "object" {
 		t.Errorf("functions.0.parameters.type = %q, want object", got)
+	}
+}
+
+func TestNormalizeKimiTemperature(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		wantExist bool
+		wantVal   float64
+	}{
+		{
+			name:      "absent temperature passes through",
+			body:      `{"model":"kimi-for-coding"}`,
+			wantExist: false,
+		},
+		{
+			name:      "thinking enabled keeps valid temperature 1.0",
+			body:      `{"model":"kimi-for-coding","thinking":{"type":"enabled","effort":"high"},"temperature":1.0}`,
+			wantExist: true,
+			wantVal:   1.0,
+		},
+		{
+			name:      "thinking enabled strips invalid temperature 0.7",
+			body:      `{"model":"kimi-for-coding","thinking":{"type":"enabled","effort":"high"},"temperature":0.7}`,
+			wantExist: false,
+		},
+		{
+			name:      "thinking enabled strips invalid temperature 0.6",
+			body:      `{"model":"kimi-for-coding","thinking":{"type":"enabled","effort":"high"},"temperature":0.6}`,
+			wantExist: false,
+		},
+		{
+			name:      "thinking disabled keeps valid temperature 0.6",
+			body:      `{"model":"kimi-for-coding","thinking":{"type":"disabled"},"temperature":0.6}`,
+			wantExist: true,
+			wantVal:   0.6,
+		},
+		{
+			name:      "thinking disabled strips invalid temperature 1.0",
+			body:      `{"model":"kimi-for-coding","thinking":{"type":"disabled"},"temperature":1.0}`,
+			wantExist: false,
+		},
+		{
+			name:      "thinking disabled strips invalid temperature 0.7",
+			body:      `{"model":"kimi-for-coding","thinking":{"type":"disabled"},"temperature":0.7}`,
+			wantExist: false,
+		},
+		{
+			name:      "implicit enabled strips invalid temperature 0.5",
+			body:      `{"model":"kimi-for-coding","temperature":0.5}`,
+			wantExist: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeKimiTemperature([]byte(tt.body))
+			res := gjson.GetBytes(got, "temperature")
+			if res.Exists() != tt.wantExist {
+				t.Fatalf("temperature.Exists() = %v, want %v; body=%s", res.Exists(), tt.wantExist, string(got))
+			}
+			if tt.wantExist && res.Float() != tt.wantVal {
+				t.Fatalf("temperature = %v, want %v; body=%s", res.Float(), tt.wantVal, string(got))
+			}
+		})
+	}
+}
+
+func TestKimiExecutor_MappedModelDoesNotWarnWhenUpstreamServesMappedModel(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(req.Body)
+		if gjson.GetBytes(body, "model").String() != "kimi-for-coding" {
+			t.Fatalf("upstream request model = %q, want kimi-for-coding", gjson.GetBytes(body, "model").String())
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"id":"chatcmpl-123","object":"chat.completion","model":"kimi-for-coding","choices":[{"message":{"role":"assistant","content":"hello"}}],"usage":{"total_tokens":10}}`,
+			)),
+		}, nil
+	}))
+
+	const alias = "kimi-mapped-no-warn-test"
+	capture := &multiProviderUsageCapture{alias: alias, records: make(chan coreusage.Record, 4)}
+	coreusage.RegisterNamedPlugin(t.Name(), capture)
+	t.Cleanup(func() {
+		coreusage.RegisterNamedPlugin(t.Name(), multiProviderNoopUsagePlugin{})
+	})
+
+	hook := new(logtest.Hook)
+	log.StandardLogger().AddHook(hook)
+	t.Cleanup(func() {
+		log.StandardLogger().ReplaceHooks(make(log.LevelHooks))
+	})
+
+	executor := NewKimiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "kimi",
+		Attributes: map[string]string{},
+		Metadata:   map[string]any{"access_token": "test-key"},
+	}
+
+	ctx = coreusage.WithRequestedModelAlias(ctx, alias)
+	payload := []byte(`{"model":"kimi-k2.8","messages":[{"role":"user","content":"hello"}]}`)
+	resp, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k2.8",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatal("expected non-empty payload")
+	}
+
+	record := capture.await(t)
+	if record.Model != "kimi-k2.8" {
+		t.Fatalf("record.Model = %q, want kimi-k2.8 (must preserve requested model)", record.Model)
+	}
+	if record.ResponseModel != "kimi-for-coding" {
+		t.Fatalf("record.ResponseModel = %q, want kimi-for-coding", record.ResponseModel)
+	}
+
+	for _, entry := range hook.AllEntries() {
+		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "upstream served model") {
+			t.Fatalf("unexpected model substitution warning for intentional mapping: %s", entry.Message)
+		}
+	}
+}
+
+func TestKimiExecutor_WarnsWhenUpstreamServesUnexpectedModel(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"id":"chatcmpl-123","object":"chat.completion","model":"unexpected-model-v2","choices":[{"message":{"role":"assistant","content":"hello"}}],"usage":{"total_tokens":10}}`,
+			)),
+		}, nil
+	}))
+
+	const alias = "kimi-unexpected-warn-test"
+	capture := &multiProviderUsageCapture{alias: alias, records: make(chan coreusage.Record, 4)}
+	coreusage.RegisterNamedPlugin(t.Name(), capture)
+	t.Cleanup(func() {
+		coreusage.RegisterNamedPlugin(t.Name(), multiProviderNoopUsagePlugin{})
+	})
+
+	hook := new(logtest.Hook)
+	log.StandardLogger().AddHook(hook)
+	t.Cleanup(func() {
+		log.StandardLogger().ReplaceHooks(make(log.LevelHooks))
+	})
+
+	executor := NewKimiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "kimi",
+		Attributes: map[string]string{},
+		Metadata:   map[string]any{"access_token": "test-key"},
+	}
+
+	ctx = coreusage.WithRequestedModelAlias(ctx, alias)
+	payload := []byte(`{"model":"kimi-k2.8","messages":[{"role":"user","content":"hello"}]}`)
+	resp, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k2.8",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatal("expected non-empty payload")
+	}
+
+	record := capture.await(t)
+	if record.Model != "kimi-k2.8" {
+		t.Fatalf("record.Model = %q, want kimi-k2.8", record.Model)
+	}
+	if record.ResponseModel != "unexpected-model-v2" {
+		t.Fatalf("record.ResponseModel = %q, want unexpected-model-v2", record.ResponseModel)
+	}
+
+	var foundWarning bool
+	for _, entry := range hook.AllEntries() {
+		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "upstream served model") && strings.Contains(entry.Message, "unexpected-model-v2") {
+			foundWarning = true
+			break
+		}
+	}
+	if !foundWarning {
+		t.Fatalf("expected substitution warning in logs for unexpected-model-v2")
+	}
+}
+
+func TestKimiExecutor_KimiAI_TargetURL(t *testing.T) {
+	var requestedURL string
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		requestedURL = req.URL.String()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"id":"1","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"hi"}}]}`)),
+			Header:     make(http.Header),
+		}, nil
+	}))
+
+	executor := NewKimiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "kimi-ai-test",
+		Provider: "kimi-ai",
+		Metadata: map[string]any{"access_token": "ai-access-token"},
+	}
+
+	payload := []byte(`{"model":"kimi-k3","messages":[{"role":"user","content":"hello"}]}`)
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if requestedURL != "https://api.kimi.ai/coding/v1/chat/completions" {
+		t.Fatalf("requestedURL = %q, want https://api.kimi.ai/coding/v1/chat/completions", requestedURL)
+	}
+
+	// Also test streaming
+	requestedURL = ""
+	streamRes, errStream := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "kimi-k3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+	})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	if streamRes == nil {
+		t.Fatal("expected stream result")
+	}
+	if requestedURL != "https://api.kimi.ai/coding/v1/chat/completions" {
+		t.Fatalf("stream requestedURL = %q, want https://api.kimi.ai/coding/v1/chat/completions", requestedURL)
+	}
+}
+
+func TestKimiExecutor_KimiAI_Refresh(t *testing.T) {
+	var refreshURL string
+	transport := kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		refreshURL = req.URL.String()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(strings.NewReader(`{
+				"access_token":"new-ai-token",
+				"refresh_token":"new-ai-refresh",
+				"token_type":"Bearer",
+				"expires_in":3600
+			}`)),
+			Header: make(http.Header),
+		}, nil
+	})
+
+	executor := NewKimiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "kimi-ai-refresh-test",
+		Provider: "kimi-ai",
+		Metadata: map[string]any{
+			"type":          "kimi-ai",
+			"access_token":  "old-token",
+			"refresh_token": "old-refresh",
+		},
+		Storage: &kimiauth.KimiTokenStorage{
+			AccessToken:  "old-token",
+			RefreshToken: "old-refresh",
+			Type:         "kimi-ai",
+			Domain:       "kimi.ai",
+		},
+	}
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", transport)
+	refreshed, err := executor.Refresh(ctx, auth)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if refreshed == nil {
+		t.Fatal("expected refreshed auth")
+	}
+	if refreshURL != "https://auth.kimi.ai/api/oauth/token" {
+		t.Fatalf("refreshURL = %q, want https://auth.kimi.ai/api/oauth/token", refreshURL)
+	}
+	if refreshed.Metadata["access_token"] != "new-ai-token" {
+		t.Fatalf("Metadata[access_token] = %v, want new-ai-token", refreshed.Metadata["access_token"])
+	}
+	if refreshed.Metadata["type"] != "kimi-ai" {
+		t.Fatalf("Metadata[type] = %v, want kimi-ai", refreshed.Metadata["type"])
+	}
+	if storage, ok := refreshed.Storage.(*kimiauth.KimiTokenStorage); ok {
+		if storage.AccessToken != "new-ai-token" {
+			t.Fatalf("storage.AccessToken = %q, want new-ai-token", storage.AccessToken)
+		}
+		if storage.Type != "kimi-ai" {
+			t.Fatalf("storage.Type = %q, want kimi-ai", storage.Type)
+		}
+		if storage.Domain != "kimi.ai" {
+			t.Fatalf("storage.Domain = %q, want kimi.ai", storage.Domain)
+		}
 	}
 }

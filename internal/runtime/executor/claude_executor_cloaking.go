@@ -188,30 +188,82 @@ func generateBillingHeader(cchSigning bool, version, messageText, entrypoint, wo
 	return b.String()
 }
 
+func resolveClaudeContinuityTags(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	incomingHeaders http.Header,
+	payload []byte,
+	confirmedClaudeCode bool,
+	existingPrevReq, existingPromptID string,
+) (prevReq, promptID string, cCtx helps.ClaudeContinuityContext, ok bool) {
+	hasExecutionMetadata := helps.ClaudeExecutionMetadataFromContext(ctx)
+	sessionID := helps.ClaudeSessionIDFromContext(ctx)
+	if sessionID == "" && auth != nil {
+		sessionID = helps.ClaudeAgentSessionUUIDForRequest(incomingHeaders, payload, payload, confirmedClaudeCode)
+	}
+	if sessionID == "" || auth == nil {
+		return "", "", helps.ClaudeContinuityContext{}, false
+	}
+
+	credIdentity := claudeDiagnosticsCredentialIdentity(auth)
+	isNewTurn := helps.IsClaudeNewPromptTurn(payload)
+	continuityKey, seq, prevMsgID, storedPrevReq, storedPromptID := helps.BeginClaudeContinuity(credIdentity, sessionID, isNewTurn, existingPromptID)
+
+	if existingPromptID != "" {
+		promptID = existingPromptID
+	} else if prevMsgID != "" && storedPromptID != "" && (hasExecutionMetadata || !isNewTurn) {
+		promptID = storedPromptID
+	} else if !hasExecutionMetadata {
+		promptID = helps.ClaudeDeterministicPromptID("cpa:prompt:" + claudeBillingFingerprintMessageText(payload))
+	} else {
+		promptID = storedPromptID
+	}
+
+	if (hasExecutionMetadata || existingPrevReq != "") && storedPrevReq != "" {
+		prevReq = storedPrevReq
+	} else {
+		prevReq = existingPrevReq
+	}
+
+	cCtx = helps.ClaudeContinuityContext{
+		Key:         continuityKey,
+		Sequence:    seq,
+		PromptID:    promptID,
+		Initialized: true,
+	}
+	if hasExecutionMetadata || existingPrevReq != "" {
+		cCtx.PreviousMessageID = prevMsgID
+		cCtx.PreviousRequestID = storedPrevReq
+	} else {
+		cCtx.PreviousMessageID = ""
+		cCtx.PreviousRequestID = ""
+	}
+	return prevReq, promptID, cCtx, true
+}
+
 func claudeBillingFingerprintMessageText(payload []byte) string {
-	messageText := ""
-	gjson.GetBytes(payload, "messages").ForEach(func(_, message gjson.Result) bool {
-		if message.Get("role").String() != "user" {
-			return true
-		}
-		content := message.Get("content")
-		candidate := ""
-		if content.Type == gjson.String {
-			candidate = content.String()
-		} else if content.IsArray() {
-			content.ForEach(func(_, part gjson.Result) bool {
-				if part.Get("type").String() == "text" {
-					candidate = part.Get("text").String()
+	idx := firstClaudeUserMessageIndex(payload)
+	if idx < 0 {
+		return ""
+	}
+	content := gjson.GetBytes(payload, fmt.Sprintf("messages.%d.content", idx))
+	if content.Type == gjson.String {
+		return content.String()
+	}
+	if content.IsArray() {
+		messageText := ""
+		content.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "text" {
+				text := part.Get("text").String()
+				if !isClaudeCodeCurrentDateReminder(text) && !isClaudeCodeContextReminder(text) {
+					messageText = text
 				}
-				return true
-			})
-		}
-		if candidate != "" {
-			messageText = candidate
-		}
-		return true
-	})
-	return messageText
+			}
+			return true
+		})
+		return messageText
+	}
+	return ""
 }
 
 func claudeCCHFallbackBillingHeader(ctx context.Context, cfg *config.Config, payload []byte, entrypoint string) string {
@@ -247,7 +299,7 @@ const claudeCodeFableReportingOutcomes = `# Reporting outcomes
 Report what actually happened, not what you intended. When you say something is done, sent, saved, fixed, or verified, that claim must rest on a result you observed in this session — tool output, the file as it now reads, the page as it now loads — not on what the step should have produced. If you did not check, say you did not check. If any step failed, was skipped, or came back different from what you expected, say so in the first sentence of your report, before anything else, even when the rest of the work succeeded. Never quietly work around a failure in a way that makes it look resolved; a problem the user can see is recoverable, one your summary hides is not. When you stop before the task is complete, your first line says so plainly and names what is left. Do not describe partial work as done, and do not let a summary read as more certain than the evidence behind it.`
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, "2.1.258", "cli", "")
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, "2.1.280", "cli", "")
 }
 
 // checkSystemInstructionsWithSigningMode keeps the top-level system in Claude
@@ -642,7 +694,7 @@ func claudeCallerSystemReminder(text string) string {
 }
 
 // claudeHistoryHasAdvisorCallOrResult reports whether messages contains an advisor
-// tool invocation (server_tool_use / tool_use) or advisor result (advisor_tool_result /
+// tool invocation (server_tool_use) or advisor result (advisor_tool_result /
 // advisor_redacted_result). Anthropic cryptographically binds the encrypted
 // advisor result to the conversation layout; any mid-conversation system splice
 // shifts message indices and causes upstream 400 errors.
@@ -659,7 +711,7 @@ func claudeHistoryHasAdvisorCallOrResult(payload []byte) bool {
 				switch blockType {
 				case "advisor_tool_result", "advisor_redacted_result":
 					return true
-				case "server_tool_use", "tool_use":
+				case "server_tool_use":
 					if block.Get("name").String() == "advisor" {
 						return true
 					}
@@ -1343,34 +1395,12 @@ func applyCloakingInternal(
 		isSubagent = helps.IsClaudeSubagentRequest(incomingHeaders, payload)
 		existingPrevReq, existingPromptID := helps.ExtractClaudeBillingTags(payload)
 
-		sessionID := helps.ClaudeSessionIDFromContext(ctx)
-		if sessionID == "" && auth != nil {
-			sessionID = helps.ClaudeAgentSessionUUIDForRequest(incomingHeaders, payload, payload, confirmedClaudeCode)
-		}
-
-		if sessionID != "" && auth != nil {
-			credIdentity := claudeDiagnosticsCredentialIdentity(auth)
-			isNewTurn := helps.IsClaudeNewPromptTurn(payload)
-			continuityKey, seq, prevMsgID, storedPrevReq, storedPromptID := helps.BeginClaudeContinuity(credIdentity, sessionID, isNewTurn, existingPromptID)
-
-			if existingPromptID != "" {
-				promptID = existingPromptID
-			} else {
-				promptID = storedPromptID
-			}
-			if storedPrevReq != "" {
-				prevReq = storedPrevReq
-			} else {
-				prevReq = existingPrevReq
-			}
-
+		var cCtx helps.ClaudeContinuityContext
+		var ok bool
+		prevReq, promptID, cCtx, ok = resolveClaudeContinuityTags(ctx, auth, incomingHeaders, payload, confirmedClaudeCode, existingPrevReq, existingPromptID)
+		if ok {
 			if continuityCtx := helps.ClaudeContinuityContextFromContext(ctx); continuityCtx != nil {
-				continuityCtx.Key = continuityKey
-				continuityCtx.Sequence = seq
-				continuityCtx.PreviousMessageID = prevMsgID
-				continuityCtx.PreviousRequestID = prevReq
-				continuityCtx.PromptID = promptID
-				continuityCtx.Initialized = true
+				*continuityCtx = cCtx
 			}
 		}
 	}

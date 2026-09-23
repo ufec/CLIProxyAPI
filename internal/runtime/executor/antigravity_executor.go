@@ -22,6 +22,7 @@ import (
 	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
@@ -439,7 +440,7 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 	// Native Antigravity reuses one transport across requests. Opt into a
 	// credential-scoped proxy transport only here so other providers keep their
 	// existing lifecycle and different OAuth identities remain isolated.
-	if proxyURL := antigravityProxyURL(cfg, auth); proxyURL != "" {
+	if proxyURL := antigravityProxyURL(ctx, cfg, auth); proxyURL != "" {
 		if transport := antigravityProxiedHTTP11Transport(auth, proxyURL, cfg); transport != nil {
 			return &http.Client{Transport: transport, Timeout: timeout}
 		}
@@ -472,7 +473,10 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 	return client
 }
 
-func antigravityProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
+func antigravityProxyURL(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) string {
+	if proxyURL := cliproxyexecutor.RequestProxyURL(ctx); proxyURL != "" {
+		return proxyURL
+	}
 	if auth != nil {
 		if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
 			return proxyURL
@@ -833,10 +837,32 @@ func hasAntigravityGoogleSearchTool(payload []byte) bool {
 	return false
 }
 
+func hasAntigravityResponsesWebSearchTool(rawJSON []byte) bool {
+	tools := util.GetGJSONBytesNoCopy(rawJSON, "tools")
+	if !tools.IsArray() {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		switch tool.Get("type").String() {
+		case "web_search", "web_search_2025_08_26", "web_search_preview", "web_search_preview_2025_03_11":
+			return true
+		}
+	}
+	return false
+}
+
 func shouldResolveAntigravityWebSearchGroundingURLs(from sdktranslator.Format, originalRequestRawJSON, requestRawJSON []byte) bool {
-	return from.String() == "claude" &&
-		hasAntigravityClaudeTypedWebSearchTool(originalRequestRawJSON) &&
-		hasAntigravityGoogleSearchTool(requestRawJSON)
+	if !hasAntigravityGoogleSearchTool(requestRawJSON) {
+		return false
+	}
+	switch from {
+	case sdktranslator.FormatClaude:
+		return hasAntigravityClaudeTypedWebSearchTool(originalRequestRawJSON)
+	case sdktranslator.FormatOpenAIResponse:
+		return hasAntigravityResponsesWebSearchTool(originalRequestRawJSON)
+	default:
+		return false
+	}
 }
 
 func (e *AntigravityExecutor) resolveWebSearchGroundingURLs(ctx context.Context, auth *cliproxyauth.Auth, from sdktranslator.Format, originalRequestRawJSON, requestRawJSON, responseRawJSON []byte) []byte {

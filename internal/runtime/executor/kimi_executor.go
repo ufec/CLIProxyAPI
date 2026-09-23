@@ -98,7 +98,12 @@ func (e *KimiExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth,
 func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	from := opts.SourceFormat
 	if from.String() == "claude" {
-		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
+		if auth != nil {
+			if auth.Attributes == nil {
+				auth.Attributes = make(map[string]string)
+			}
+			auth.Attributes["base_url"] = helps.ResolveKimiClaudeBaseURL(auth)
+		}
 		preparedReq, replayScope := prepareKimiThinkingReplayRequest(ctx, req, opts)
 		claudeResp, errExecute := e.ClaudeExecutor.Execute(ctx, auth, preparedReq, opts)
 		if errExecute != nil {
@@ -133,6 +138,7 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 
 	// Strip kimi- prefix and any [1m] suffix for upstream API
 	upstreamModel := normalizeKimiUpstreamModel(baseModel)
+	reporter.SetUpstreamModel(upstreamModel)
 	body, err = sjson.SetBytes(body, "model", upstreamModel)
 	if err != nil {
 		return resp, fmt.Errorf("kimi executor: failed to set model in payload: %w", err)
@@ -151,9 +157,10 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		return resp, err
 	}
 	body = normalizeKimiTools(body)
+	body = normalizeKimiTemperature(body)
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
-	url := kimiauth.KimiAPIBaseURL + "/v1/chat/completions"
+	url := helps.ResolveKimiChatURL(auth)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return resp, err
@@ -208,6 +215,7 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	reporter.ObserveResponseModel(data)
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	var param any
 	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
@@ -224,7 +232,12 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	from := opts.SourceFormat
 	if from.String() == "claude" {
-		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
+		if auth != nil {
+			if auth.Attributes == nil {
+				auth.Attributes = make(map[string]string)
+			}
+			auth.Attributes["base_url"] = helps.ResolveKimiClaudeBaseURL(auth)
+		}
 		preparedReq, replayScope := prepareKimiThinkingReplayRequest(ctx, req, opts)
 		claudeResult, errExecute := e.ClaudeExecutor.ExecuteStream(ctx, auth, preparedReq, opts)
 		if errExecute != nil {
@@ -257,6 +270,7 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 
 	// Strip kimi- prefix and any [1m] suffix for upstream API
 	upstreamModel := normalizeKimiUpstreamModel(baseModel)
+	reporter.SetUpstreamModel(upstreamModel)
 	body, err = sjson.SetBytes(body, "model", upstreamModel)
 	if err != nil {
 		return nil, fmt.Errorf("kimi executor: failed to set model in payload: %w", err)
@@ -279,9 +293,10 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		return nil, err
 	}
 	body = normalizeKimiTools(body)
+	body = normalizeKimiTemperature(body)
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
-	url := kimiauth.KimiAPIBaseURL + "/v1/chat/completions"
+	url := helps.ResolveKimiChatURL(auth)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -345,6 +360,7 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			reporter.ObserveResponseModel(line)
 			streamUsage.ObserveOpenAIStream(line)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param, claudeInputTokens)
 			for i := range chunks {
@@ -389,6 +405,7 @@ func (e *KimiExecutor) executeResponses(ctx context.Context, auth *cliproxyauth.
 
 	body := bytes.Clone(req.Payload)
 	upstreamModel := normalizeKimiUpstreamModel(baseModel)
+	reporter.SetUpstreamModel(upstreamModel)
 	var errSet error
 	body, errSet = sjson.SetBytes(body, "model", upstreamModel)
 	if errSet != nil {
@@ -407,6 +424,7 @@ func (e *KimiExecutor) executeResponses(ctx context.Context, auth *cliproxyauth.
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "openai-response", opts.SourceFormat.String(), "", body, req.Payload, requestedModel, requestPath, opts.Headers)
 	body = normalizeKimiTools(body)
+	body = normalizeKimiTemperature(body)
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
 	url := helps.ResolveKimiResponsesURL(auth)
@@ -467,6 +485,7 @@ func (e *KimiExecutor) executeResponses(ctx context.Context, auth *cliproxyauth.
 		return resp, errRead
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	reporter.ObserveResponseModel(data)
 
 	if usage, ok := helps.ParseCodexUsage(data); ok && (usage.TotalTokens > 0 || usage.InputTokens > 0) {
 		reporter.Publish(ctx, usage)
@@ -497,6 +516,7 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 
 	body := bytes.Clone(req.Payload)
 	upstreamModel := normalizeKimiUpstreamModel(baseModel)
+	reporter.SetUpstreamModel(upstreamModel)
 	var errSet error
 	body, errSet = sjson.SetBytes(body, "model", upstreamModel)
 	if errSet != nil {
@@ -515,6 +535,7 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "openai-response", opts.SourceFormat.String(), "", body, req.Payload, requestedModel, requestPath, opts.Headers)
 	body = normalizeKimiTools(body)
+	body = normalizeKimiTemperature(body)
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
 	url := helps.ResolveKimiResponsesURL(auth)
@@ -582,7 +603,9 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 
 		emitTranslatedLine := func(line []byte) bool {
 			if responseFormat == sdktranslator.FormatOpenAIResponse {
-				chunkPayload := append(bytes.Clone(line), '\n')
+				chunkPayload := make([]byte, len(line)+1)
+				copy(chunkPayload, line)
+				chunkPayload[len(line)] = '\n'
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunkPayload}:
 					return true
@@ -604,6 +627,7 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			reporter.ObserveResponseModel(line)
 
 			if bytes.HasPrefix(line, dataTag) {
 				dataBytes := bytes.TrimSpace(line[len(dataTag):])
@@ -637,7 +661,12 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 
 // CountTokens estimates token count for Kimi requests.
 func (e *KimiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
+	if auth != nil {
+		if auth.Attributes == nil {
+			auth.Attributes = make(map[string]string)
+		}
+		auth.Attributes["base_url"] = helps.ResolveKimiClaudeBaseURL(auth)
+	}
 	return e.ClaudeExecutor.countTokensUpstream(ctx, auth, req, opts)
 }
 
@@ -931,7 +960,11 @@ func (e *KimiExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		return auth, nil
 	}
 
-	client := kimiauth.NewDeviceFlowClientWithDeviceIDAndProxyURL(e.cfg, resolveKimiDeviceID(auth), auth.ProxyURL)
+	domain := kimiauth.ResolveKimiDomainFromAuth(auth)
+	client := kimiauth.NewDeviceFlowClientWithDomainDeviceIDAndProxyURL(e.cfg, domain, resolveKimiDeviceID(auth), auth.ProxyURL)
+	if httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 30*time.Second); httpClient != nil {
+		client.SetHTTPClient(httpClient)
+	}
 	td, err := client.RefreshToken(ctx, refreshToken)
 	if err != nil {
 		return nil, err
@@ -947,7 +980,36 @@ func (e *KimiExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		exp := time.Unix(td.ExpiresAt, 0).UTC().Format(time.RFC3339)
 		auth.Metadata["expired"] = exp
 	}
-	auth.Metadata["type"] = "kimi"
+	if currentType, ok := auth.Metadata["type"].(string); !ok || currentType == "" {
+		if kimiauth.IsKimiAIDomain(domain) {
+			auth.Metadata["type"] = "kimi-ai"
+		} else {
+			auth.Metadata["type"] = "kimi"
+		}
+	}
+	if _, ok := auth.Metadata["domain"]; !ok {
+		auth.Metadata["domain"] = domain
+	}
+	if _, ok := auth.Metadata["base_url"]; !ok {
+		auth.Metadata["base_url"] = helps.ResolveKimiBaseURL(auth)
+	}
+	if storage, ok := auth.Storage.(*kimiauth.KimiTokenStorage); ok && storage != nil {
+		newStorage := *storage
+		newStorage.AccessToken = td.AccessToken
+		if td.RefreshToken != "" {
+			newStorage.RefreshToken = td.RefreshToken
+		}
+		if td.ExpiresAt > 0 {
+			newStorage.Expired = time.Unix(td.ExpiresAt, 0).UTC().Format(time.RFC3339)
+		}
+		if newStorage.Domain == "" {
+			newStorage.Domain = domain
+		}
+		if newStorage.BaseURL == "" {
+			newStorage.BaseURL = helps.ResolveKimiBaseURL(auth)
+		}
+		auth.Storage = &newStorage
+	}
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
 	return auth, nil
@@ -1096,7 +1158,7 @@ func stripKimiPrefix(model string) string {
 // It strips the CLIProxyAPI "kimi-" prefix and any Claude Code "[1m]" context
 // suffix while preserving a trailing thinking suffix (e.g. "(1024)"), so that
 // the upstream API receives IDs such as "k3(1024)" instead of "kimi-k3[1m](1024)".
-// K2.7 Code aliases are remapped to the official Kimi Code model IDs before
+// K2.8 and K2.7 Code aliases are remapped to the official Kimi Code model IDs before
 // generic prefix stripping, so already-canonical IDs stay idempotent.
 func normalizeKimiUpstreamModel(model string) string {
 	model = strings.TrimSpace(model)
@@ -1107,7 +1169,7 @@ func normalizeKimiUpstreamModel(model string) string {
 	}
 	var normalized string
 	switch base {
-	case "kimi-k2.7-code", "k2.7-code", "kimi-for-coding", "for-coding":
+	case "kimi-k2.8", "k2.8", "kimi-k2.8-code", "k2.8-code", "kimi-k2.8-preview", "k2.8-preview", "kimi-k2.7-code", "k2.7-code", "kimi-for-coding", "for-coding":
 		normalized = "kimi-for-coding"
 	case "kimi-k2.7-code-highspeed", "k2.7-code-highspeed", "kimi-for-coding-highspeed", "for-coding-highspeed":
 		normalized = "kimi-for-coding-highspeed"
@@ -1199,4 +1261,29 @@ func normalizeKimiParametersSchema(paramsRaw string) string {
 	}
 
 	return string(paramBytes)
+}
+
+// normalizeKimiTemperature normalizes or strips the temperature parameter for Kimi upstream.
+// Upstream enforces strict temperature values based on thinking mode:
+// - Thinking disabled: only temperature 0.6 is accepted (or absent).
+// - Thinking enabled: only temperature 1.0 is accepted (or absent).
+// If a client specifies an invalid temperature, stripping it allows the upstream
+// to apply its safe model default and avoids a 400 Bad Request error.
+func normalizeKimiTemperature(body []byte) []byte {
+	tempRes := gjson.GetBytes(body, "temperature")
+	if !tempRes.Exists() {
+		return body
+	}
+	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+	if strings.EqualFold(thinkingType, "disabled") {
+		if tempRes.Float() != 0.6 {
+			body, _ = sjson.DeleteBytes(body, "temperature")
+		}
+		return body
+	}
+	// Default / enabled thinking requires temperature 1.0.
+	if tempRes.Float() != 1.0 {
+		body, _ = sjson.DeleteBytes(body, "temperature")
+	}
+	return body
 }
