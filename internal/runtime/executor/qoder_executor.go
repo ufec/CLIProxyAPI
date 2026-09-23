@@ -153,24 +153,15 @@ func qoderChatBody(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) 
 		model = "qfmodel"
 	}
 
-	// Extract OpenAI-compatible fields from the client payload.
-	msgText := ""
-	if gjson.ValidBytes(payload) {
-		last := gjson.GetBytes(payload, "messages|@reverse|0")
-		content := last.Get("content")
-		switch content.Type {
-		case gjson.String:
-			msgText = content.String()
-		case gjson.JSON:
-			// content may be an array of {type,text}
-			var sb strings.Builder
-			content.ForEach(func(_, item gjson.Result) bool {
-				if item.Get("type").String() == "text" {
-					sb.WriteString(item.Get("text").String())
-				}
-				return true
-			})
-			msgText = sb.String()
+	var inputMessages []map[string]any
+	if rawMessages := gjson.GetBytes(payload, "messages"); rawMessages.IsArray() {
+		if errUnmarshal := json.Unmarshal([]byte(rawMessages.Raw), &inputMessages); errUnmarshal != nil {
+			return nil, fmt.Errorf("qoder executor: decode input messages: %w", errUnmarshal)
+		}
+		for _, message := range inputMessages {
+			if content, ok := message["content"].(string); ok {
+				message["content"] = []any{map[string]any{"type": "text", "text": content}}
+			}
 		}
 	}
 	maxTokens := int64(32000)
@@ -212,7 +203,11 @@ func qoderChatBody(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) 
 		"type": "text",
 		"text": "You are a Qoder agent. Use the instructions below and the tools available to you to assist the user.",
 	}
-	userContent := map[string]any{"type": "text", "text": msgText}
+	messages := make([]any, 0, len(inputMessages)+1)
+	messages = append(messages, map[string]any{"role": "system", "content": []any{systemPrompt}})
+	for _, message := range inputMessages {
+		messages = append(messages, message)
+	}
 	body := map[string]any{
 		"parameters": map[string]any{
 			"reasoning_effort": reasoning,
@@ -234,10 +229,7 @@ func qoderChatBody(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) 
 		"session_type": "app",
 		"model_config": modelConfig,
 		"system":       []any{systemPrompt},
-		"messages": []any{
-			map[string]any{"role": "system", "content": []any{systemPrompt}},
-			map[string]any{"role": "user", "content": []any{userContent}},
-		},
+		"messages":     messages,
 	}
 	return json.Marshal(body)
 }
@@ -411,6 +403,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if err != nil {
 		return nil, fmt.Errorf("qoder executor: build chat body: %w", err)
 	}
+	logQoderRequest(e, qoderSourcePayload(req, opts), plaintext)
 	// Single shared timestamp: signing material and wire body are produced from
 	// the same plaintext+ts inside PrepareRequest.
 	ts := time.Now().Unix()
@@ -462,6 +455,7 @@ func (e *QoderExecutor) streamSSE(ctx context.Context, resp *http.Response, chun
 	scanner.Buffer(make([]byte, 0, 64<<10), 4<<20)
 	forwarded := 0
 	var firstLine string
+	toolAdapter := &qoderToolCallAdapter{}
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if !strings.HasPrefix(line, "data:") {
@@ -482,11 +476,18 @@ func (e *QoderExecutor) streamSSE(ctx context.Context, resp *http.Response, chun
 		if inner == "" || !json.Valid([]byte(inner)) {
 			continue
 		}
-		select {
-		case chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(inner)}:
-			forwarded++
-		case <-ctx.Done():
+		adapted, errAdapt := toolAdapter.convert([]byte(inner))
+		if errAdapt != nil {
+			chunks <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("qoder executor: adapt tool call: %w", errAdapt)}
 			return
+		}
+		for _, output := range adapted {
+			select {
+			case chunks <- cliproxyexecutor.StreamChunk{Payload: output}:
+				forwarded++
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 	if errScan := scanner.Err(); errScan != nil {
@@ -495,6 +496,19 @@ func (e *QoderExecutor) streamSSE(ctx context.Context, resp *http.Response, chun
 		default:
 		}
 		return
+	}
+	flushed, errFlush := toolAdapter.flush()
+	if errFlush != nil {
+		chunks <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("qoder executor: flush tool call: %w", errFlush)}
+		return
+	}
+	for _, output := range flushed {
+		select {
+		case chunks <- cliproxyexecutor.StreamChunk{Payload: output}:
+			forwarded++
+		case <-ctx.Done():
+			return
+		}
 	}
 	if forwarded == 0 {
 		// Upstream returned HTTP 200 but no forwardable payload. Surface a
@@ -589,12 +603,85 @@ func (e *QoderExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 	if errClose := httpReq.Body.Close(); errClose != nil {
 		log.Errorf("qoder executor: close body: %v", errClose)
 	}
+	logQoderRequest(e, nil, plaintext)
 	ts := time.Now().Unix()
 	if errPrep := e.PrepareRequest(httpReq, auth, ts, plaintext); errPrep != nil {
 		return nil, errPrep
 	}
 	client := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	return client.Do(httpReq)
+}
+
+func qoderSourcePayload(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) []byte {
+	if len(req.Payload) > 0 {
+		return req.Payload
+	}
+	return opts.OriginalRequest
+}
+
+// logQoderRequest emits a local diagnostic of the request after the Qoder body
+// has been built. It is intentionally debug-only because the body contains the
+// user's prompt and may contain sensitive project context.
+func logQoderRequest(e *QoderExecutor, sourcePayload, plaintext []byte) {
+	if e == nil || e.cfg == nil || !e.cfg.Debug {
+		return
+	}
+
+	source := summarizeQoderMessages(sourcePayload)
+	generated := summarizeQoderMessages(plaintext)
+	log.WithFields(log.Fields{
+		"source_bytes":             len(sourcePayload),
+		"source_messages":          source.messageCount,
+		"source_roles":             strings.Join(source.roles, ","),
+		"source_content_chars":     source.contentChars,
+		"generated_bytes":          len(plaintext),
+		"generated_messages":       generated.messageCount,
+		"generated_roles":          strings.Join(generated.roles, ","),
+		"generated_content_chars":  generated.contentChars,
+		"generated_system_entries": generated.systemEntries,
+	}).Debug("qoder executor: request context summary")
+	log.Debugf("qoder executor: plaintext request body=%s", truncateForLog(string(plaintext), 1<<20))
+}
+
+type qoderMessageSummary struct {
+	messageCount  int
+	roles         []string
+	contentChars  int
+	systemEntries int
+}
+
+func summarizeQoderMessages(payload []byte) qoderMessageSummary {
+	var summary qoderMessageSummary
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return summary
+	}
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return summary
+	}
+	messages.ForEach(func(_, message gjson.Result) bool {
+		summary.messageCount++
+		role := message.Get("role").String()
+		if role != "" {
+			summary.roles = append(summary.roles, role)
+		}
+		if role == "system" {
+			summary.systemEntries++
+		}
+		content := message.Get("content")
+		if content.Type == gjson.String {
+			summary.contentChars += len([]rune(content.String()))
+		} else if content.Exists() {
+			content.ForEach(func(_, item gjson.Result) bool {
+				if item.Get("type").String() == "text" {
+					summary.contentChars += len([]rune(item.Get("text").String()))
+				}
+				return true
+			})
+		}
+		return true
+	})
+	return summary
 }
 
 // qoderSSEUnwrap unwraps one outer envelope line -> inner chunk (used by tests).
