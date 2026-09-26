@@ -446,6 +446,9 @@ func (e *QoderExecutor) streamSSE(ctx context.Context, resp *http.Response, chun
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		msg := fmt.Errorf("qoder executor: upstream status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		if resp.StatusCode == http.StatusUnauthorized || (resp.StatusCode == http.StatusForbidden && qoderLoginExpired(body)) {
+			msg = qoderUnauthorizedError{message: fmt.Sprintf("qoder executor: login expired (upstream status %d)", resp.StatusCode)}
+		}
 		log.Errorf("qoder executor: non-200 response status=%d ct=%q body=%q", resp.StatusCode, resp.Header.Get("Content-Type"), truncateForLog(string(body), 4096))
 		chunks <- cliproxyexecutor.StreamChunk{Err: msg}
 		return
@@ -468,6 +471,10 @@ func (e *QoderExecutor) streamSSE(ctx context.Context, resp *http.Response, chun
 		if payload == "" || !gjson.Valid(payload) {
 			continue
 		}
+		if qoderLoginExpired([]byte(payload)) {
+			chunks <- cliproxyexecutor.StreamChunk{Err: qoderUnauthorizedError{message: "qoder executor: login expired"}}
+			return
+		}
 		// Final block: data:{"firstTokenDuration":...}
 		if !gjson.Get(payload, "body").Exists() {
 			continue
@@ -475,6 +482,10 @@ func (e *QoderExecutor) streamSSE(ctx context.Context, resp *http.Response, chun
 		inner := gjson.Get(payload, "body").String()
 		if inner == "" || !json.Valid([]byte(inner)) {
 			continue
+		}
+		if qoderLoginExpired([]byte(inner)) {
+			chunks <- cliproxyexecutor.StreamChunk{Err: qoderUnauthorizedError{message: "qoder executor: login expired"}}
+			return
 		}
 		adapted, errAdapt := toolAdapter.convert([]byte(inner))
 		if errAdapt != nil {
@@ -542,6 +553,20 @@ func (e *QoderExecutor) streamSSE(ctx context.Context, resp *http.Response, chun
 	}
 }
 
+type qoderUnauthorizedError struct{ message string }
+
+func (e qoderUnauthorizedError) Error() string { return e.message }
+func (qoderUnauthorizedError) StatusCode() int { return http.StatusUnauthorized }
+
+func qoderLoginExpired(body []byte) bool {
+	if !gjson.ValidBytes(body) {
+		return false
+	}
+	code := strings.TrimSpace(gjson.GetBytes(body, "code").String())
+	message := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "message").String()))
+	return code == "105" || message == "login expired"
+}
+
 // truncateForLog caps a string for log output so error bodies do not flood.
 func truncateForLog(s string, max int) string {
 	if max <= 0 || len(s) <= max {
@@ -567,6 +592,17 @@ func (e *QoderExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	result.Metadata["access_token"] = updated.Token
 	result.Metadata["security_oauth_token"] = updated.Token
 	result.Metadata["refresh_token"] = updated.RefreshToken
+	expiresIn := updated.ExpiresIn
+	if expiresIn <= 0 {
+		// Qoder's job-token response advertises a 24-hour lifetime, but the
+		// refresh endpoint may omit expires_in. Preserve that observed lifetime
+		// so the previous token's absolute expiry is not reused after rotation.
+		expiresIn = 24 * 60 * 60
+	}
+	now := time.Now()
+	result.Metadata["expires_in"] = expiresIn
+	result.Metadata["expires_at"] = now.Add(time.Duration(expiresIn) * time.Second).UnixMilli()
+	result.Metadata["timestamp"] = now.UnixMilli()
 	if result.Attributes == nil {
 		result.Attributes = make(map[string]string)
 	}

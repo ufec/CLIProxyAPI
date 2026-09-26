@@ -27,9 +27,9 @@ func (QoderAuthenticator) Provider() string {
 	return "qoder"
 }
 
-// RefreshLead returns nil; refresh is triggered by authorization failures or manually.
+// RefreshLead refreshes Qoder job tokens five minutes before expiry.
 func (QoderAuthenticator) RefreshLead() *time.Duration {
-	return nil
+	return new(5 * time.Minute)
 }
 
 // Login initiates the Qoder device flow authentication.
@@ -91,9 +91,13 @@ func (a QoderAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 		"uid":                   uid,
 		"x-gw-user-id":          uid,
 		"timestamp":             time.Now().UnixMilli(),
+		"expires_in":            jt.ExpiresIn,
 		"redirect_uri_protocol": "device",
 		"device_token":          dt.Token,
 		"device_refresh_token":  dt.RefreshToken,
+	}
+	if jt.ExpiresIn > 0 {
+		metadata["expires_at"] = time.Now().Add(time.Duration(jt.ExpiresIn) * time.Second).UnixMilli()
 	}
 	if jt.RefreshToken != "" {
 		metadata["refresh_token"] = jt.RefreshToken

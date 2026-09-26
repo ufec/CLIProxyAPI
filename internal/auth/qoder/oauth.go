@@ -78,6 +78,7 @@ func RefreshDeviceToken(ctx context.Context, client *http.Client, endpoint, refr
 type JobTokenResponse struct {
 	Token        string `json:"token"`
 	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int64  `json:"expires_in"`
 }
 
 // RefreshJobToken exchanges a job refresh token for a new job token pair.
